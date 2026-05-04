@@ -1,0 +1,6 @@
+# /Users/yves/Documents/personnel/brvm/OrangeScrumRpa/.gitignore
+
+.env
+.venv/
+__pycache__/
+*.pyc
