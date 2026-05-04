@@ -201,6 +201,3 @@ playwright install chromium
 # 4. Configurer le .env
 cp .env.example .env  # puis remplir les valeurs
 ```
-
-**SAWADOGO Yves Dieudonné**
-
