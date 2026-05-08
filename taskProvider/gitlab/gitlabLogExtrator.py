@@ -11,8 +11,8 @@ headers = {
 
 params = {
     "author": "SAWADOGO Yves Dieudonne",
-    "since": "2026-04-20T00:00:00Z",
-    "until": "2026-05-31T23:59:59Z",
+    "since": "2026-05-05T00:00:00Z",
+    "until": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
     "per_page": 200,
     "ref_name": "preprod"
 }
