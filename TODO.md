@@ -1,16 +1,23 @@
 # TODO
 
-## Planification launchd (18h) — accès au dossier Documents
+## Planification 18h — accès au dossier Documents (version développement uniquement)
 
-Le RPA est planifié via `~/Library/LaunchAgents/tech.synelia.eprojet-rpa.run.plist` (lun→ven 18h00),
-mais macOS bloque l'accès à `~/Documents` pour les tâches lancées en arrière-plan
-(`/bin/zsh: can't open input file ...`, code 127). La notification de 17h55 fonctionne déjà.
+En développement, la tâche launchd de 18h lance `.venv/bin/python rpa_timesheet.py --scheduled` depuis
+`~/Documents/…`, que macOS bloque pour les tâches en arrière-plan. La notification de 17h55 fonctionne.
 
-À faire (au choix) :
-- [ ] Donner l'accès : Réglages Système → Confidentialité et sécurité → Accès complet au disque → `+` → `/bin/zsh`
-- [ ] **ou** déplacer le projet hors de Documents (ex. `~/dev/OrangeScrumRpa`) et mettre à jour les chemins
-      dans le plist `tech.synelia.eprojet-rpa.run.plist`
-- [ ] Tester : `launchctl kickstart gui/$(id -u)/tech.synelia.eprojet-rpa.run` puis lire `logs/rpa_<date>.log`
+**Réglé par la version packagée** : l'application (dans /Applications) garde sa configuration et ses journaux dans
+`~/Library/Application Support/RPA Timesheet`, hors de Documents. Activer la programmation depuis l'application.
+
+Si on reste en développement (au choix) :
+- [ ] Réglages Système → Confidentialité et sécurité → Accès complet au disque → `+` → `.venv/bin/python` (cible du lien)
+- [ ] **ou** déplacer le projet hors de Documents (ex. `~/dev/OrangeScrumRpa`) puis réactiver la programmation
+
+## Application packagée
+
+- [ ] Installer `dist/RPA Timesheet.app` dans /Applications et activer la programmation depuis l'application
+- [ ] Construire et tester le `.exe` Windows (workflow GitHub « Build », ou `python build.py` sur un PC Windows)
+- [ ] Tester sous Windows : Planificateur de tâches (17h55 / 18h), notifications, Trousseau (Gestionnaire d'identification)
+- [ ] Distribution macOS à d'autres postes : signer / notariser l'app (compte Apple Developer), sinon clic droit → Ouvrir
 
 ## Nettoyage E-PROJET
 

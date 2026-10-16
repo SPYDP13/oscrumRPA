@@ -1,0 +1,54 @@
+# Construit l'application sur macOS (.app) et Windows (.exe) — onglet « Actions » → « Build » → « Run workflow ».
+# Les applications sont téléchargeables dans les « Artifacts » de l'exécution.
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirement.txt
+
+      - name: Dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirement.txt
+
+      - name: Construction
+        run: python build.py
+
+      - name: Vérification (diagnostic de l'application construite)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "dist/RPA Timesheet.app/Contents/MacOS/RPA Timesheet" --diagnostic
+          else
+            "dist/RPA Timesheet/RPA Timesheet.exe" --diagnostic
+          fi
+
+      - name: Archive macOS
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent "dist/RPA Timesheet.app" "RPA-Timesheet-macOS.zip"
+
+      - name: Archive Windows
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "dist/RPA Timesheet" -DestinationPath "RPA-Timesheet-Windows.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RPA-Timesheet-${{ runner.os }}
+          path: RPA-Timesheet-*.zip

@@ -1,18 +1,16 @@
 from taskProvider.gitlab.gitlabLogExtrator import GitlabLogExtractor
-from taskProvider.gitlab.syncState import save_last_since
+from taskProvider.gitlab.syncState import save_last_since, save_last_run
 from taskProvider.outlook.outlookCalendarExtractor import OutlookCalendarExtractor
-from config import EXCHANGE_EMAIL, EXCHANGE_PASSWORD, TASK_SOURCE
-from RPA.EProjetRpa import EProjetRpa
+from config import EXCHANGE_EMAIL, EXCHANGE_PASSWORD, TASK_SOURCE, TIMESHEET_TARGET
 from taskRefinings.AutoTaskScheduleRefiner import AutoTaskScheduleRefiner
-from taskRefinings.GeminiTaskRefiner import GeminiTaskRefiner
-from taskRefinings.MistralTaskRefiner import MistralTaskRefiner
-from taskRefinings.ClaudeTaskRefiner import ClaudeTaskRefiner
+from taskRefinings.factory import get_refiner_class
 
 class GitlabOrangeScrumExecutor:
-    def __init__(self):
-        pass
+    def __init__(self, since: str = None, until: str = None):
+        """since / until : période imposée (rattrapage). Sinon : depuis la dernière synchro jusqu'à aujourd'hui."""
         self.taskList = []
-        self.extractor = GitlabLogExtractor()
+        self.custom_period = bool(since or until)
+        self.extractor = GitlabLogExtractor(since=since, until=until)
 
     def init_task_list(self):
         # 1. Source des tâches (TASK_SOURCE dans .env) : commits GitLab, réunions Outlook, ou les deux
@@ -28,13 +26,10 @@ class GitlabOrangeScrumExecutor:
             meetings = OutlookCalendarExtractor(since=self.extractor.params["since"],
                                                 until=self.extractor.params["until"]).get_meetings()
 
-        # 2. Analyse et refactorisation avec Gemini (determine date et hours pour la tache)
-        # analyser = GeminiTaskRefiner(commits=tasks, since=self.extractor.params["since"], until=self.extractor.params["until"])
-        # Pour utiliser Mistral a la place de Gemini :
-        # analyser = MistralTaskRefiner(commits=tasks, since=self.extractor.params["since"], until=self.extractor.params["until"])
-        # Pour utiliser Claude (via le CLI `claude`, sans cle API) :
-        analyser = ClaudeTaskRefiner(commits=tasks, since=self.extractor.params["since"], until=self.extractor.params["until"],
-                                     meetings=meetings)
+        # 2. Analyse IA (TASK_REFINER dans .env : claude, gemini ou mistral) : titres, jours et heures
+        refiner_class = get_refiner_class()
+        analyser = refiner_class(commits=tasks, since=self.extractor.params["since"], until=self.extractor.params["until"],
+                                 meetings=meetings)
         self.taskList = analyser.execute()
 
         for c in self.taskList:
@@ -52,10 +47,24 @@ class GitlabOrangeScrumExecutor:
         # scheduler.schedule(tasks=self.taskList, since=self.extractor.params["since"], until=self.extractor.params["until"])
 
     def execute(self):
-        # Ancienne plateforme : from RPA.OrangeScrumRpa import OrangeScrumRpa ; OrangeScrumRpa(self.taskList)
-        rpa = EProjetRpa(self.taskList)
-        rpa.create_tasks()
+        if self.taskList:
+            # Plateforme de timesheet (TIMESHEET_TARGET dans .env) : E-PROJET ou OrangeScrum
+            if TIMESHEET_TARGET == "orangescrum":
+                from RPA.OrangeScrumRpa import OrangeScrumRpa
+                rpa = OrangeScrumRpa(self.taskList)
+            else:
+                from RPA.EProjetRpa import EProjetRpa
+                rpa = EProjetRpa(self.taskList)
+            rpa.create_tasks()
+        else:
+            print("ℹ️ Aucune tâche à saisir sur la période")
+
+        # Une période imposée (rattrapage) ne touche ni au point de reprise ni à l'exécution du jour
+        if self.custom_period:
+            return
 
         # Une fois les tâches et timesheets créées avec succès, on mémorise le point d'arrêt
-        # pour que le prochain lancement reprenne automatiquement à partir de cette date.
+        # pour que le prochain lancement reprenne automatiquement à partir de cette date,
+        # ainsi que la date du jour (les exécutions programmées de la journée sont alors sautées).
         save_last_since(self.extractor.params["until"])
+        save_last_run()

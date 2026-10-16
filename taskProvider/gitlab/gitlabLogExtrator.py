@@ -1,10 +1,11 @@
 import requests
 from datetime import datetime, timedelta
-from config import GITLAB_TOKEN
+from config import GITLAB_TOKEN, GITLAB_URL, GITLAB_AUTHOR, GITLAB_BRANCHES, GITLAB_PROJECT_IDS
 from taskProvider.gitlab.syncState import get_last_since
+from dateformat import date_simple as format_date_simple, date_str as format_date_str
 
-GITLAB_URL = "https://gitlab.orange.bf/api/v4"
-PROJECT_IDS = ["406", "404", "414", "429", "415", "531", "622"]  # ← liste de projets
+PROJECT_IDS = GITLAB_PROJECT_IDS  # ← liste de projets (GITLAB_PROJECT_IDS dans .env)
+BRANCHES = GITLAB_BRANCHES        # ← une ou plusieurs branches (GITLAB_BRANCHES dans .env)
 
 headers = {
     "PRIVATE-TOKEN": GITLAB_TOKEN
@@ -16,21 +17,26 @@ _since = get_last_since()
 _until = datetime.strptime(_since, "%Y-%m-%dT%H:%M:%SZ") + timedelta(days=SYNC_WINDOW_DAYS)
 
 params = {
-    "author": "SAWADOGO Yves Dieudonne",
+    "author": GITLAB_AUTHOR,
     "since": _since,  # ← reprend automatiquement à la date de la dernière synchro
     # "until": _until.strftime("%Y-%m-%dT23:59:59Z"),  # ← since + 10 jours
     "until": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
     "per_page": 200,
-    "ref_name": "preprod"
 }
 
 
 class GitlabLogExtractor:
-    def __init__(self):
+    def __init__(self, since: str = None, until: str = None):
+        """since / until ("2026-10-12T00:00:00Z") : période imposée, sinon reprise depuis la dernière synchro"""
         self.gitlab_url = GITLAB_URL
         self.project_ids = PROJECT_IDS  # ← liste
+        self.branches = BRANCHES
         self.headers = headers
-        self.params = params
+        self.params = {**params}
+        if since:
+            self.params["since"] = since
+        if until:
+            self.params["until"] = until
 
     def get_gitlab_commit_log(self):
         all_commits = []
@@ -59,12 +65,19 @@ class GitlabLogExtractor:
         return all_commits
 
     def _fetch_commits_for_project(self, project_id: str, seen_titles: set) -> list:
-        """Récupère tous les commits d'un projet donné (avec pagination)"""
+        """Récupère les commits d'un projet sur chaque branche configurée (dédoublonnés par titre)"""
+        commits_result = []
+        for branch in self.branches:
+            commits_result.extend(self._fetch_commits_for_branch(project_id, branch, seen_titles))
+        return commits_result
+
+    def _fetch_commits_for_branch(self, project_id: str, branch: str, seen_titles: set) -> list:
+        """Récupère tous les commits d'un projet sur une branche (avec pagination)"""
         commits_result = []
         page = 1
 
         # Copie des params pour ne pas modifier l'original
-        request_params = {**self.params}
+        request_params = {**self.params, "ref_name": branch}
 
         while True:
             request_params["page"] = page
@@ -95,10 +108,10 @@ class GitlabLogExtractor:
                 dt = datetime.fromisoformat(raw_date)
 
                 # "May 13, Wed 12:00 am"
-                date_str = dt.strftime("%b %-d, %a %-I:%M %p").replace("AM", "am").replace("PM", "pm")
+                date_str = format_date_str(dt)
 
                 # "2026-5-13 12:00 am"
-                date_simple = f"{dt.year}-{dt.month}-{dt.day} {dt.strftime('%-I:%M')} {dt.strftime('%p').lower()}"
+                date_simple = format_date_simple(dt)
 
                 commits_result.append({
                     "title": title,

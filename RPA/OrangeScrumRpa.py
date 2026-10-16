@@ -3,7 +3,9 @@ from playwright.sync_api import sync_playwright
 from datetime import datetime
 from collections import defaultdict
 
-from config import OSCRUM_USERNAME, OSCRUM_PASSWORD, OSCRUM_PROJECT  # ← import depuis config
+from config import (OSCRUM_URL, OSCRUM_USERNAME, OSCRUM_PASSWORD, OSCRUM_PROJECT,  # ← import depuis config
+                    OSCRUM_TASK_TYPE_ID, OSCRUM_ASSIGNEE_ID)
+from dateformat import month_day
 
 
 
@@ -24,7 +26,7 @@ class OrangeScrumRpa:
             browser = p.chromium.launch(headless=False)
             page = browser.new_page()
 
-            page.goto("https://orangescrum.synelia.tech/dashboard")
+            page.goto(f"{OSCRUM_URL}/dashboard")
             page.fill("#email", OSCRUM_USERNAME)
             page.fill("#password", OSCRUM_PASSWORD)
             page.click("button[type='submit']")
@@ -56,8 +58,8 @@ class OrangeScrumRpa:
                     document.querySelector("#QT_due_dat").value = "{task['date']}";
                 }}
                 """)
-                page.select_option("#qt_task_type", value="10")
-                page.select_option("#quick-assign", value="289")
+                page.select_option("#qt_task_type", value=str(OSCRUM_TASK_TYPE_ID))
+                page.select_option("#quick-assign", value=str(OSCRUM_ASSIGNEE_ID))
                 page.click("#quickcase_qt")
                 page.wait_for_selector("#new_task_label")
                 page.wait_for_timeout(1000)
@@ -104,7 +106,7 @@ class OrangeScrumRpa:
                         pass
             return 0, 0
 
-        page.goto("https://orangescrum.synelia.tech/timelog#/timesheet")
+        page.goto(f"{OSCRUM_URL}/timelog#/timesheet")
         page.wait_for_selector(".weakly-nav")
 
         current_week = None
@@ -112,7 +114,7 @@ class OrangeScrumRpa:
         for day_str in sorted(day_map.keys(), key=parse_day):
             tasks_for_day = day_map[day_str]
             dt = parse_day(day_str)
-            target_month_day = dt.strftime("%b %-d")  # "May 4"
+            target_month_day = month_day(dt)  # "May 4"
             target_m, target_d = parse_md(target_month_day)
             week = dt.isocalendar()[:2]
 
@@ -263,5 +265,5 @@ class OrangeScrumRpa:
                 page.wait_for_timeout(1500)
                 return True
 
-        print(f"  ⚠️ Jour non trouvé dans la semaine visible : {dt.strftime('%b %-d')}")
+        print(f"  ⚠️ Jour non trouvé dans la semaine visible : {month_day(dt)}")
         return False

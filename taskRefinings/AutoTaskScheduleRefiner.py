@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import random
+from dateformat import date_str as format_date_str
 
 
 #/!\ Ce module est utilise pour planifier des tâches sur une période donnée. (faire une repartition d'un nombre donne de tache sur une periode donne de sort a avoir 40h par semaine, 5-12h par jour, en respectant les jours ouvrables et la date de commit des taches)
@@ -64,7 +65,7 @@ class AutoTaskScheduleRefiner:
             task_hours = self._split_hours(total_h, len(tasks_for_day))
 
             # Format des dates pour ce jour
-            date_str = work_day.strftime("%b %-d, %a 09:00 am")       # "May 4, Mon 09:00 am"
+            date_str = format_date_str(work_day, "09:00 am")       # "May 4, Mon 09:00 am"
             date_simple = f"{work_day.year}-{work_day.month}-{work_day.day} 09:00 am"  # "2026-5-4 09:00 am"
 
             for task, h in zip(tasks_for_day, task_hours):

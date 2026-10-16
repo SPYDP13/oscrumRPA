@@ -7,12 +7,13 @@ from requests.adapters import HTTPAdapter
 from exchangelib import Account, Configuration, Credentials, DELEGATE, EWSDateTime, EWSTimeZone
 from exchangelib.protocol import BaseProtocol
 
+from app_paths import resource
 from config import EXCHANGE_SERVER, EXCHANGE_EMAIL, EXCHANGE_USERNAME, EXCHANGE_PASSWORD
+from dateformat import date_simple, date_str
 
 # Le serveur Exchange n'envoie pas son certificat intermédiaire (Sectigo DV R36) : on l'ajoute
 # aux autorités de certifi pour que la vérification SSL passe (sans la désactiver).
-_INTERMEDIATE = os.path.join(os.path.dirname(__file__), "..", "..", "certs",
-                             "sectigo-public-server-auth-ca-dv-r36.pem")
+_INTERMEDIATE = resource("certs", "sectigo-public-server-auth-ca-dv-r36.pem")
 _CA_BUNDLE = os.path.join(tempfile.gettempdir(), "eprojet-rpa-ca-bundle.pem")
 
 
@@ -83,8 +84,8 @@ class OutlookCalendarExtractor:
             meetings.append({
                 "title": (ev.subject or "Réunion").strip(),
                 # mêmes formats que les commits GitLab
-                "dateStr": start.strftime("%b %-d, %a %-I:%M %p").replace("AM", "am").replace("PM", "pm"),
-                "date": f"{start.year}-{start.month}-{start.day} {start.strftime('%-I:%M')} {start.strftime('%p').lower()}",
+                "dateStr": date_str(start),
+                "date": date_simple(start),
                 "start": start.strftime("%H:%M"),
                 "end": end.strftime("%H:%M"),
                 "hours": hours,
