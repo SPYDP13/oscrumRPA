@@ -57,7 +57,7 @@ class OrangeScrumRpa:
                 }}
                 """)
                 page.select_option("#qt_task_type", value="10")
-                page.select_option("#quick-assign", value="281")
+                page.select_option("#quick-assign", value="289")
                 page.click("#quickcase_qt")
                 page.wait_for_selector("#new_task_label")
                 page.wait_for_timeout(1000)

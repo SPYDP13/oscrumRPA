@@ -8,15 +8,15 @@ from config import GEMINI_API_KEY
 
 
 class GeminiTaskRefiner:
-    def __init__(self, commits: list, since: str, until: str = None):
+    def __init__(self, commits: list, since: str, until: str):
         """
         commits : liste plate de tous les commits (avec project_id)
         since   : "2026-04-20T00:00:00Z"
-        until   : "2026-05-31T00:00:00Z" ou None (= aujourd'hui)
+        until   : "2026-05-31T23:59:59Z" (params["until"] de GitlabLogExtractor)
         """
         self.commits = commits
         self.since = since
-        self.until = until or datetime.now().strftime("%Y-%m-%dT23:59:59Z")
+        self.until = until
 
         genai.configure(api_key=GEMINI_API_KEY)
         self.model = genai.GenerativeModel("gemini-flash-latest")

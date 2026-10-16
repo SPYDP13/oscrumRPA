@@ -5,7 +5,7 @@ import random
 #/!\ Ce module est utilise pour planifier des tâches sur une période donnée. (faire une repartition d'un nombre donne de tache sur une periode donne de sort a avoir 40h par semaine, 5-12h par jour, en respectant les jours ouvrables et la date de commit des taches)
 class AutoTaskScheduleRefiner:
 
-    def schedule(self, tasks: list, since: str, until: str = None) -> list:
+    def schedule(self, tasks: list, since: str, until: str) -> list:
         """
         Prend la liste des tâches brutes et retourne la même liste enrichie avec :
         - date    : jour ouvrable assigné  ex: "2026-5-4 09:00 am"
@@ -13,11 +13,7 @@ class AutoTaskScheduleRefiner:
         - hours   : durée assignée à la tâche  ex: 3.0
         """
         since_dt = datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").date()
-        until_dt = (
-            datetime.now().date()
-            if until is None
-            else datetime.strptime(until, "%Y-%m-%dT%H:%M:%SZ").date()
-        )
+        until_dt = datetime.strptime(until, "%Y-%m-%dT%H:%M:%SZ").date()
 
         # 1️⃣ Jours ouvrables (lundi → vendredi)
         working_days = []

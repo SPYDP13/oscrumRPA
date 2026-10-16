@@ -1,17 +1,24 @@
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import GITLAB_TOKEN
+from taskProvider.gitlab.syncState import get_last_since
 
 GITLAB_URL = "https://gitlab.orange.bf/api/v4"
-PROJECT_IDS = ["406", "404", "414", "429", "415"]  # ← liste de projets
+PROJECT_IDS = ["406", "404", "414", "429", "415", "531", "622"]  # ← liste de projets
 
 headers = {
     "PRIVATE-TOKEN": GITLAB_TOKEN
 }
 
+SYNC_WINDOW_DAYS = 13  # ← nombre de jours synchronisés à chaque lancement
+
+_since = get_last_since()
+_until = datetime.strptime(_since, "%Y-%m-%dT%H:%M:%SZ") + timedelta(days=SYNC_WINDOW_DAYS)
+
 params = {
     "author": "SAWADOGO Yves Dieudonne",
-    "since": "2026-05-05T00:00:00Z",
+    "since": _since,  # ← reprend automatiquement à la date de la dernière synchro
+    # "until": _until.strftime("%Y-%m-%dT23:59:59Z"),  # ← since + 10 jours
     "until": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
     "per_page": 200,
     "ref_name": "preprod"

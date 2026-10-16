@@ -6,4 +6,4 @@ if __name__ == '__main__':
     # Execution gitlab
     gitlabExecutor = GitlabOrangeScrumExecutor()
     gitlabExecutor.init_task_list()
-    gitlabExecutor.execute()
+    # gitlabExecutor.execute()
