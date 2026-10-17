@@ -4,7 +4,7 @@ Lancement : .venv/bin/python rpa_timesheet.py (ou l'application packagée)
 """
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,7 +21,7 @@ import shutil
 import browser_setup
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
 from config import ENV_PATH, SECRET_KEYS
-from taskProvider.gitlab.syncState import get_last_run, get_last_since
+from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
 from ui import catalog, checks, scheduler, settings_store
 from ui.theme import STYLESHEET
 
@@ -597,6 +597,47 @@ class PeriodDialog(QDialog):
         return self.start.date().toString("yyyy-MM-dd"), self.end.date().toString("yyyy-MM-dd")
 
 
+def _resume_day() -> date:
+    """Jour à partir duquel la prochaine exécution saisira (un point de reprise à 23:59:59 = le lendemain)"""
+    since = datetime.strptime(get_last_since(), "%Y-%m-%dT%H:%M:%SZ")
+    return (since + timedelta(seconds=1)).date() if since.hour == 23 else since.date()
+
+
+# ─────────────────────────────────────────────────────────────
+class ResumeDialog(QDialog):
+    """Correction du point de reprise : date à partir de laquelle la prochaine exécution saisit"""
+
+    def __init__(self, current: date, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Point de reprise")
+        self.setMinimumWidth(460)
+        self.day = QDateEdit(QDate(current.year, current.month, current.day))
+        self.day.setCalendarPopup(True)
+        self.day.setDisplayFormat("dd/MM/yyyy")
+        self.day.setMaximumDate(QDate.currentDate())
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(12)
+        lay.addWidget(_label("Corriger le point de reprise", "h2"))
+        lay.addWidget(_label("Reprendre à partir du (inclus)", "fieldLabel"))
+        lay.addWidget(self.day)
+        lay.addWidget(_label("La prochaine exécution saisira les tâches à partir de cette date jusqu'au jour de "
+                             "l'exécution. Choisir le lendemain du dernier jour déjà saisi, pour ne rien saisir deux "
+                             "fois. E-PROJET n'accepte la saisie que sur les 8 derniers jours.", "hint", wrap=True))
+        buttons = QHBoxLayout()
+        cancel, ok = _button("Annuler"), _button("Enregistrer", "primary")
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+
+    def value(self) -> date:
+        return self.day.date().toPython()
+
+
 # ─────────────────────────────────────────────────────────────
 class BrowserDialog(QDialog):
     """Premier lancement : téléchargement du navigateur Chromium utilisé par le RPA"""
@@ -701,16 +742,18 @@ class MainWindow(QMainWindow):
         self.btn_run = _button("▶  Exécuter maintenant", "primary")
         self.btn_preview = _button("Aperçu sans saisie")
         self.btn_period = _button("Rattrapage…")
+        self.btn_resume = _button("Point de reprise…")
         self.btn_stop = _button("■  Arrêter", "danger")
         self.btn_schedule = _button("")
         self.btn_run.clicked.connect(lambda: self.start_run([]))
         self.btn_preview.clicked.connect(lambda: self.start_run(["--dry-run"]))
         self.btn_period.clicked.connect(self.run_period)
+        self.btn_resume.clicked.connect(self.edit_resume)
         self.btn_stop.clicked.connect(self.stop_run)
         self.btn_schedule.clicked.connect(self.toggle_schedule)
         actions = QHBoxLayout()
         actions.setSpacing(10)
-        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_stop):
+        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_stop):
             actions.addWidget(b)
         actions.addStretch()
         actions.addWidget(self.btn_schedule)
@@ -758,13 +801,13 @@ class MainWindow(QMainWindow):
                                 f"projet {v['EPROJET_PROJECT_ID']}" if target == "eprojet" else v["OSCRUM_PROJECT"])
 
         last = get_last_run()
-        since = datetime.strptime(get_last_since(), "%Y-%m-%dT%H:%M:%SZ")
+        resume = f"reprise au {_resume_day():%d/%m/%Y}"
         if last == date.today().isoformat():
-            self.card_last.set("Aujourd'hui", f"reprise au {since:%d/%m %H:%M}")
+            self.card_last.set("Aujourd'hui", resume)
         elif last:
-            self.card_last.set(datetime.strptime(last, "%Y-%m-%d").strftime("%d/%m/%Y"), f"reprise au {since:%d/%m %H:%M}")
+            self.card_last.set(datetime.strptime(last, "%Y-%m-%d").strftime("%d/%m/%Y"), resume)
         else:
-            self.card_last.set("—", f"reprise au {since:%d/%m %H:%M}")
+            self.card_last.set("—", resume)
 
         installed = scheduler.is_installed()
         nxt = scheduler.next_run()
@@ -776,7 +819,7 @@ class MainWindow(QMainWindow):
         self.btn_schedule.setText("Désactiver la programmation" if installed else "Programmer 17h55 / 18h")
 
         running = self.process is not None
-        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_config):
+        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_config):
             b.setEnabled(not running)
         self.btn_stop.setVisible(running)
         self.lbl_status.setText("⏳ Exécution en cours…" if running else "")
@@ -801,6 +844,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             since, until = dialog.period()
             self.start_run(["--since", since, "--until", until])
+
+    def edit_resume(self):
+        dialog = ResumeDialog(min(_resume_day(), date.today()), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            set_resume_date(dialog.value())
+            self._append(f"\n📌 Point de reprise corrigé : prochaine exécution à partir du {dialog.value():%d/%m/%Y}\n")
+            self.refresh()
 
     def start_run(self, args: list):
         if self.process:

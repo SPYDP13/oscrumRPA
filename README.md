@@ -6,6 +6,8 @@ tâches et répartit **40 h par semaine**.
 
 Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution programmée chaque jour ouvré à 18h.
 
+> 📦 **Installer l'application** (macOS / Windows) : voir [INSTALLATION.md](INSTALLATION.md).
+
 ---
 
 ## 📋 Fonctionnement
@@ -29,7 +31,8 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
    - **E-PROJET** : création de chaque tâche, puis dans le *Suivi quotidien* : heures du jour, statut **Terminée**,
      avancement **100 %** — une tâche active de même titre est réutilisée (pas de doublon)
    - **OrangeScrum** : *Quick Task* puis saisie dans la *Timesheet*
-4. **Point de reprise** enregistré : la prochaine exécution repart de là.
+4. **Point de reprise** enregistré : la prochaine exécution repart de là. Au premier lancement, il est fixé au
+   **lundi de la semaine en cours** ; il se corrige avec le bouton **Point de reprise…**.
 
 Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pas.
 
@@ -57,7 +60,8 @@ Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pa
 ### Tableau de bord
 - Cartes : sources, analyse IA, timesheet, dernière exécution, prochaine exécution
 - **▶ Exécuter maintenant** · **Aperçu sans saisie** (analyse seule, rien n'est envoyé) · **Rattrapage…** (période
-  choisie, sans toucher au point de reprise) · **Arrêter** · **Programmer / Désactiver** · **Configuration**
+  choisie, sans toucher au point de reprise) · **Point de reprise…** (date à partir de laquelle la prochaine
+  exécution saisit, par exemple après un rattrapage) · **Arrêter** · **Programmer / Désactiver** · **Configuration**
 - Journal en direct, aussi enregistré dans `logs/rpa_AAAA-MM-JJ.log`
 
 ### Ligne de commande
