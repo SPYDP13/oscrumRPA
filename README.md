@@ -19,7 +19,7 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
 ```
 
 1. **Extraction** depuis le dernier point de reprise jusqu'à aujourd'hui :
-   - **GitLab** : commits de l'auteur, sur chaque projet et chaque branche configurés
+   - **GitLab** : commits de l'auteur, sur chaque couple projet / branche configuré
    - **Outlook** : réunions du calendrier Exchange (refusées, annulées, privées, journée entière et week-end ignorées)
 2. **Analyse IA** :
    - les **réunions** gardent leur **durée réelle** (type de tâche « Projet »)
@@ -47,14 +47,23 @@ Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pa
    |---|---|
    | Sources | GitLab, Outlook ou les deux |
    | Analyse IA | Claude (CLI Claude Code, sans clé), Gemini (clé API) ou Mistral (clé API + agent) |
-   | GitLab | URL de l'API, auteur, branche(s), id des projets, token |
+   | GitLab | URL de l'API, auteur, projets avec leur branche (bouton **+ Ajouter un projet**), token |
    | Outlook | serveur Exchange, adresse mail, login (facultatif), mot de passe |
    | Timesheet | E-PROJET ou OrangeScrum : identifiants, projet, types de tâche, responsable / personne assignée |
    | Programmation | notification 17h55 + exécution 18h, lancement immédiat |
 
+   Aucun champ propre à l'utilisateur n'est prérempli (auteur, projets, branches, projet timesheet, responsable,
+   personne assignée, types de tâche, agent Mistral) : seules les adresses des serveurs et les réglages techniques
+   le sont.
+
+   **GitLab** : une ligne par projet avec sa branche ; pour suivre plusieurs branches d'un même projet, ajouter une
+   ligne par branche (✕ pour retirer une ligne). L'auteur et au moins un projet sont obligatoires pour passer
+   l'étape. *Tester la connexion* vérifie le token, chaque projet et l'existence de sa branche.
+
    Chaque étape a un bouton **Tester la connexion**. L'étape Timesheet a aussi **⟳ Charger les listes depuis la
-   plateforme** : connexion avec les identifiants saisis et remplissage des listes (projets, types de tâche,
-   responsables externes ou membres du projet). Les listes restent modifiables à la main (saisie d'un id).
+   plateforme** : connexion avec les identifiants saisis et remplissage des listes (projets du compte connecté,
+   types de tâche, responsables externes ou membres du projet). Les projets dépendent du compte : la liste est vide
+   tant qu'elle n'a pas été chargée. Les listes restent modifiables à la main (saisie d'un id).
 2. **Téléchargement du navigateur** Chromium (≈ 350 Mo, une seule fois — version packagée).
 
 ### Tableau de bord

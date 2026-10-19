@@ -9,7 +9,7 @@
 ## Fonctionnalités
 
 **Récupération de l'activité**
-- **GitLab** : commits de l'auteur choisi, sur plusieurs projets et plusieurs branches
+- **GitLab** : commits de l'auteur choisi, sur plusieurs projets, chacun avec sa propre branche
 - **Outlook** (Exchange) : réunions du calendrier, en ignorant les réunions annulées, refusées, privées, sur la
   journée entière ou le week-end
 - Reprise automatique là où la dernière exécution s'était arrêtée : rien n'est saisi deux fois
@@ -69,7 +69,10 @@
 
 Au premier lancement :
 - l'application propose de **télécharger le navigateur** (une seule fois) ;
-- l'**assistant de configuration** s'ouvre : renseigner chaque étape et tester les connexions ;
+- l'**assistant de configuration** s'ouvre : renseigner chaque étape et tester les connexions. Rien n'est
+  prérempli pour vous : saisir l'auteur des commits, ajouter chaque projet GitLab avec sa branche
+  (**+ Ajouter un projet**), puis à l'étape Timesheet cliquer sur **Charger les listes** pour choisir votre projet,
+  le responsable / la personne assignée et les types de tâche ;
 - macOS demande l'accès au Trousseau : répondre **« Toujours autoriser »** (une seule demande) ;
 - autoriser les **notifications** si macOS le propose ;
 - activer la **programmation** depuis le tableau de bord.
@@ -117,7 +120,8 @@ Planificateur de tâches).
 3. Réactiver la programmation.
 
 La configuration, le point de reprise et les mots de passe sont conservés : ils ne sont pas stockés dans
-l'application.
+l'application. Une ancienne configuration GitLab (liste d'id de projets + liste de branches) est reprise
+automatiquement : chaque projet avec chaque branche, modifiable dans l'assistant.
 
 ## Désinstallation
 
