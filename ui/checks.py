@@ -1,16 +1,25 @@
 """Tests de connexion lancés depuis l'assistant. Chaque fonction renvoie un message ou lève une exception."""
+from urllib.parse import quote
+
 import requests
 
 
-def check_gitlab(url: str, token: str, project_ids: list) -> str:
+def check_gitlab(url: str, token: str, projects: list) -> str:
+    """projects : couples (id du projet, branche)"""
     headers = {"PRIVATE-TOKEN": token}
     r = requests.get(f"{url}/user", headers=headers, timeout=15)
     if r.status_code != 200:
         raise RuntimeError(f"Token refusé ({r.status_code})")
     lines = [f"Connecté en tant que {r.json().get('name')}"]
-    for pid in project_ids:
-        p = requests.get(f"{url}/projects/{pid}", headers=headers, timeout=15)
-        lines.append(f"  {pid} : {p.json().get('name_with_namespace') if p.ok else f'introuvable ({p.status_code})'}")
+    for pid, branch in projects:
+        p = requests.get(f"{url}/projects/{quote(pid, safe='')}", headers=headers, timeout=15)
+        if not p.ok:
+            lines.append(f"  {pid} : introuvable ({p.status_code})")
+            continue
+        b = requests.get(f"{url}/projects/{quote(pid, safe='')}/repository/branches/{quote(branch, safe='')}",
+                         headers=headers, timeout=15)
+        lines.append(f"  {pid} : {p.json().get('name_with_namespace')} — branche {branch} "
+                     + ("✓" if b.ok else f"introuvable ({b.status_code})"))
     return "\n".join(lines)
 
 

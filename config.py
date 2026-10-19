@@ -20,8 +20,25 @@ def get_secret(name: str):
     return secret_vault.load(SECRET_KEYS).get(name) or os.getenv(name)
 
 
-def _list(name: str, default: str) -> list:
-    return [v.strip() for v in os.getenv(name, default).split(",") if v.strip()]
+def parse_gitlab_projects(raw: str) -> list:
+    """« 406:preprod,404:develop » → [("406", "preprod"), ("404", "develop")]"""
+    pairs = []
+    for item in (raw or "").split(","):
+        pid, _, branch = item.partition(":")
+        if pid.strip() and branch.strip():
+            pairs.append((pid.strip(), branch.strip()))
+    return pairs
+
+
+def format_gitlab_projects(pairs: list) -> str:
+    return ",".join(f"{pid}:{branch}" for pid, branch in pairs)
+
+
+def legacy_gitlab_projects(project_ids: str, branches: str) -> str:
+    """Ancienne configuration (GITLAB_PROJECT_IDS × GITLAB_BRANCHES) convertie en couples projet:branche"""
+    ids = [v.strip() for v in (project_ids or "").split(",") if v.strip()]
+    names = [v.strip() for v in (branches or "").split(",") if v.strip()]
+    return format_gitlab_projects([(pid, b) for pid in ids for b in names])
 
 
 # Dossier hors de ~/Documents (lisible par la tâche programmée sans autorisation macOS) : marqueur de dernière exécution
@@ -35,8 +52,8 @@ if TASK_REFINER not in ("claude", "gemini", "mistral"):
 GEMINI_API_KEY  = get_secret("GEMINI_API_KEY")
 GEMINI_MODEL    = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 MISTRAL_API_KEY = get_secret("MISTRAL_API_KEY")
-MISTRAL_AGENT_ID = os.getenv("MISTRAL_AGENT_ID", "ag_019f0512d57473a3b28830cbd2517270")
-MISTRAL_AGENT_VERSION = int(os.getenv("MISTRAL_AGENT_VERSION", "3"))
+MISTRAL_AGENT_ID = os.getenv("MISTRAL_AGENT_ID")
+MISTRAL_AGENT_VERSION = os.getenv("MISTRAL_AGENT_VERSION") or None  # vide = dernière version de l'agent
 CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
 CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL")  # ex: "sonnet", "opus" — None = modele par defaut du CLI
 
@@ -51,21 +68,22 @@ OSCRUM_USERNAME = os.getenv("OSCRUM_USERNAME")
 OSCRUM_PASSWORD = get_secret("OSCRUM_PASSWORD")
 OSCRUM_PROJECT = os.getenv("OSCRUM_PROJECT")
 OSCRUM_TASK_TYPE_ID = os.getenv("OSCRUM_TASK_TYPE_ID", "10")  # 10 = Update
-OSCRUM_ASSIGNEE_ID  = os.getenv("OSCRUM_ASSIGNEE_ID", "289")  # 289 = Moi (utilisateur connecté)
+OSCRUM_ASSIGNEE_ID  = os.getenv("OSCRUM_ASSIGNEE_ID")  # id de la personne assignée (propre à chaque compte)
 
 # GitLab
 GITLAB_URL         = os.getenv("GITLAB_URL", "https://gitlab.orange.bf/api/v4")
 GITLAB_TOKEN       = get_secret("GITLAB_TOKEN")
-GITLAB_AUTHOR      = os.getenv("GITLAB_AUTHOR", "SAWADOGO Yves Dieudonne")
-GITLAB_BRANCHES    = _list("GITLAB_BRANCHES", "preprod")
-GITLAB_PROJECT_IDS = _list("GITLAB_PROJECT_IDS", "406,404,414,429,415,531,622")
+GITLAB_AUTHOR      = os.getenv("GITLAB_AUTHOR")
+# Couples projet:branche (un projet peut apparaître avec plusieurs branches)
+GITLAB_PROJECTS    = parse_gitlab_projects(os.getenv("GITLAB_PROJECTS") or legacy_gitlab_projects(
+    os.getenv("GITLAB_PROJECT_IDS"), os.getenv("GITLAB_BRANCHES")))
 
 # E-PROJET (remplace OrangeScrum) — identifiants par défaut repris de OSCRUM_* si non définis
 EPROJET_URL      = os.getenv("EPROJET_URL", "https://e-projet.synelia.tech/EProjet-1")
 EPROJET_USERNAME = os.getenv("EPROJET_USERNAME") or OSCRUM_USERNAME
 EPROJET_PASSWORD = get_secret("EPROJET_PASSWORD") or OSCRUM_PASSWORD
-EPROJET_PROJECT_ID      = os.getenv("EPROJET_PROJECT_ID", "836")           # OBF | ORANGE CONNECT
-EPROJET_RESP_EXTERNE    = os.getenv("EPROJET_RESP_EXTERNE", "KAMBOU Serge")
+EPROJET_PROJECT_ID      = os.getenv("EPROJET_PROJECT_ID")
+EPROJET_RESP_EXTERNE    = os.getenv("EPROJET_RESP_EXTERNE")
 EPROJET_TYPE_TACHE_ID   = os.getenv("EPROJET_TYPE_TACHE_ID", "-3")         # Developpement
 EPROJET_TYPE_TACHE_REUNION_ID = os.getenv("EPROJET_TYPE_TACHE_REUNION_ID", "-4")  # Projet (réunions Outlook)
 EPROJET_STATUT_TACHE_ID = os.getenv("EPROJET_STATUT_TACHE_ID", "-3")       # En cours (à la création)

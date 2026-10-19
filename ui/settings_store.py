@@ -4,38 +4,30 @@ import os
 import secret_vault
 from dotenv import dotenv_values, set_key, unset_key
 
-from config import ENV_PATH, SECRET_KEYS
+from config import ENV_PATH, SECRET_KEYS, legacy_gitlab_projects
 
-# Valeurs proposées quand rien n'est encore configuré
+# Valeurs proposées quand rien n'est encore configuré (aucune donnée propre à un utilisateur ou un projet)
 DEFAULTS = {
     "TASK_SOURCE": "gitlab",
     "TASK_REFINER": "claude",
     "TIMESHEET_TARGET": "eprojet",
     "OSCRUM_URL": "https://orangescrum.synelia.tech",
-    "OSCRUM_TASK_TYPE_ID": "10",
-    "OSCRUM_ASSIGNEE_ID": "289",
-    "EPROJET_TYPE_TACHE_ID": "-3",
-    "EPROJET_TYPE_TACHE_REUNION_ID": "-4",
     "CLAUDE_CLI_PATH": "claude",
     "GEMINI_MODEL": "gemini-flash-latest",
-    "MISTRAL_AGENT_ID": "ag_019f0512d57473a3b28830cbd2517270",
-    "MISTRAL_AGENT_VERSION": "3",
     "GITLAB_URL": "https://gitlab.orange.bf/api/v4",
-    "GITLAB_AUTHOR": "SAWADOGO Yves Dieudonne",
-    "GITLAB_BRANCHES": "preprod",
-    "GITLAB_PROJECT_IDS": "406,404,414,429,415,531,622",
     "EXCHANGE_SERVER": "exchmail.orange-cit.ci",
     "EPROJET_URL": "https://e-projet.synelia.tech/EProjet-1",
-    "EPROJET_PROJECT_ID": "836",
-    "EPROJET_RESP_EXTERNE": "KAMBOU Serge",
 }
+
+# Anciennes clés remplacées par GITLAB_PROJECTS (retirées du .env à l'enregistrement)
+LEGACY_KEYS = ("GITLAB_BRANCHES", "GITLAB_PROJECT_IDS")
 
 FIELDS = (
     "TASK_SOURCE", "TASK_REFINER",
     "CLAUDE_CLI_PATH", "CLAUDE_MODEL",
     "GEMINI_API_KEY", "GEMINI_MODEL",
     "MISTRAL_API_KEY", "MISTRAL_AGENT_ID", "MISTRAL_AGENT_VERSION",
-    "GITLAB_URL", "GITLAB_AUTHOR", "GITLAB_BRANCHES", "GITLAB_PROJECT_IDS", "GITLAB_TOKEN",
+    "GITLAB_URL", "GITLAB_AUTHOR", "GITLAB_PROJECTS", "GITLAB_TOKEN",
     "EXCHANGE_SERVER", "EXCHANGE_EMAIL", "EXCHANGE_USERNAME", "EXCHANGE_PASSWORD",
     "TIMESHEET_TARGET",
     "EPROJET_URL", "EPROJET_USERNAME", "EPROJET_PASSWORD", "EPROJET_PROJECT_ID", "EPROJET_RESP_EXTERNE",
@@ -53,6 +45,8 @@ def load() -> dict:
             values[key] = secrets.get(key) or env.get(key) or ""
         else:
             values[key] = env.get(key) or DEFAULTS.get(key, "")
+    values["GITLAB_PROJECTS"] = values["GITLAB_PROJECTS"] or legacy_gitlab_projects(
+        env.get("GITLAB_PROJECT_IDS"), env.get("GITLAB_BRANCHES"))
     # Ancienne configuration OrangeScrum reprise si E-PROJET n'est pas encore renseigné
     values["EPROJET_USERNAME"] = values["EPROJET_USERNAME"] or env.get("OSCRUM_USERNAME") or ""
     values["EPROJET_PASSWORD"] = values["EPROJET_PASSWORD"] or values["OSCRUM_PASSWORD"]
@@ -71,6 +65,9 @@ def save(values: dict):
                 unset_key(ENV_PATH, key)  # le secret ne reste pas en clair dans .env
         else:
             set_key(ENV_PATH, key, (values.get(key) or "").strip(), quote_mode="never")
+    for key in LEGACY_KEYS:
+        if key in env:
+            unset_key(ENV_PATH, key)
     set_key(ENV_PATH, "UI_CONFIGURED", "1", quote_mode="never")
 
 

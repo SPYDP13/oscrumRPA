@@ -20,7 +20,7 @@ import shutil
 
 import browser_setup
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
-from config import ENV_PATH, SECRET_KEYS
+from config import ENV_PATH, SECRET_KEYS, format_gitlab_projects, parse_gitlab_projects
 from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
 from ui import catalog, checks, scheduler, settings_store
 from ui.theme import STYLESHEET
@@ -29,10 +29,6 @@ SOURCE_LABELS = {"gitlab": "GitLab", "outlook": "Outlook", "both": "GitLab + Out
 REFINER_LABELS = {"claude": "Claude", "gemini": "Gemini", "mistral": "Mistral"}
 TIMESHEET_LABELS = {"eprojet": "E-PROJET", "orangescrum": "OrangeScrum"}
 DAYS_FR = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."]
-
-
-def _split(s: str) -> list:
-    return [v.strip() for v in s.split(",") if v.strip()]
 
 
 def _label(text: str, name: str = None, wrap: bool = False) -> QLabel:
@@ -108,6 +104,76 @@ class Field(QWidget):
         lay.addWidget(self.edit)
         if hint:
             lay.addWidget(_label(hint, "hint", wrap=True))
+
+    def value(self) -> str:
+        return self.edit.text().strip()
+
+
+class ProjectBranches:
+    """Spécification d'une liste de couples projet / branche (bouton « + » pour en ajouter)"""
+
+    def __init__(self, key: str, label: str, hint: str = ""):
+        self.key, self.label, self.hint = key, label, hint
+
+
+class ProjectBranchesField(QWidget):
+    """Une ligne par couple « id du projet · branche » ; enregistré sous la forme 406:preprod,404:develop"""
+
+    def __init__(self, spec: ProjectBranches, value: str):
+        super().__init__()
+        self.rows = []
+        self.rows_layout = QVBoxLayout()
+        self.rows_layout.setSpacing(8)
+        add = _button("+  Ajouter un projet")
+        add.clicked.connect(lambda: self._add_row().setFocus())
+
+        header = QHBoxLayout()
+        header.addWidget(_label("Id du projet", "hint"), 1)
+        header.addWidget(_label("Branche", "hint"), 1)
+        header.addSpacing(44)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addWidget(_label(spec.label, "fieldLabel"))
+        lay.addLayout(header)
+        lay.addLayout(self.rows_layout)
+        lay.addWidget(add, alignment=Qt.AlignmentFlag.AlignLeft)
+        if spec.hint:
+            lay.addWidget(_label(spec.hint, "hint", wrap=True))
+
+        for pid, branch in parse_gitlab_projects(value) or [("", "")]:
+            self._add_row(pid, branch)
+
+    def _add_row(self, pid: str = "", branch: str = "") -> QLineEdit:
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(8)
+        pid_edit, branch_edit = QLineEdit(pid), QLineEdit(branch)
+        pid_edit.setPlaceholderText("ex. 406")
+        branch_edit.setPlaceholderText("ex. preprod")
+        remove = _button("✕")
+        remove.setFixedWidth(36)
+        remove.setToolTip("Retirer ce projet")
+        remove.clicked.connect(lambda: self._remove_row(row))
+        rl.addWidget(pid_edit, 1)
+        rl.addWidget(branch_edit, 1)
+        rl.addWidget(remove)
+        self.rows.append((row, pid_edit, branch_edit))
+        self.rows_layout.addWidget(row)
+        return pid_edit
+
+    def _remove_row(self, row: QWidget):
+        self.rows = [r for r in self.rows if r[0] is not row]
+        row.deleteLater()
+        if not self.rows:
+            self._add_row()
+
+    def pairs(self) -> list:
+        return [(p.text().strip(), b.text().strip()) for _, p, b in self.rows if p.text().strip() and b.text().strip()]
+
+    def value(self) -> str:
+        return format_gitlab_projects(self.pairs())
 
 
 class Combo:
@@ -194,6 +260,9 @@ class FormSection(QWidget):
             if isinstance(spec, Combo):
                 field = ComboField(spec, values.get(spec.key, ""))
                 key = spec.key
+            elif isinstance(spec, ProjectBranches):
+                field = ProjectBranchesField(spec, values.get(spec.key, ""))
+                key = spec.key
             else:
                 key, label, placeholder, *hint = spec
                 field = Field(key, label, values.get(key, ""), placeholder, hint[0] if hint else "")
@@ -226,7 +295,7 @@ class FormSection(QWidget):
         lay.addStretch()  # garde les champs groupés quand le formulaire est dans une pile plus haute
 
     def values(self) -> dict:
-        return {k: (f.value() if isinstance(f, ComboField) else f.edit.text().strip()) for k, f in self.fields.items()}
+        return {k: f.value() for k, f in self.fields.items()}
 
     def _show(self, state: str, text: str):
         self.result.setObjectName(state)
@@ -365,7 +434,7 @@ class SetupDialog(QDialog):
             "mistral": ("Mistral\nAgent Mistral", FormSection([
                 ("MISTRAL_API_KEY", "Clé API Mistral", ""),
                 ("MISTRAL_AGENT_ID", "Id de l'agent", "ag_…"),
-                ("MISTRAL_AGENT_VERSION", "Version de l'agent", "3"),
+                ("MISTRAL_AGENT_VERSION", "Version de l'agent", "vide = dernière version"),
             ], v, check=lambda f: checks.check_mistral(f["MISTRAL_API_KEY"], f["MISTRAL_AGENT_ID"],
                                                        f["MISTRAL_AGENT_VERSION"]))),
         }, v["TASK_REFINER"])
@@ -377,12 +446,15 @@ class SetupDialog(QDialog):
         self.gitlab_form = FormSection([
             ("GITLAB_URL", "URL de l'API GitLab", "https://gitlab.exemple.com/api/v4"),
             ("GITLAB_AUTHOR", "Auteur des commits", "Nom tel qu'affiché dans GitLab"),
-            ("GITLAB_BRANCHES", "Branches", "preprod, develop", "Plusieurs branches séparées par des virgules."),
-            ("GITLAB_PROJECT_IDS", "Id des projets", "406, 404, 531", "Séparés par des virgules."),
+            ProjectBranches("GITLAB_PROJECTS", "Projets et branches",
+                            "Un projet par ligne avec sa branche. Pour suivre plusieurs branches d'un même projet, "
+                            "ajoute une ligne par branche."),
             ("GITLAB_TOKEN", "Token d'accès privé", "glpat-…", "GitLab → Préférences → Access Tokens, scope read_api."),
-        ], v, check=lambda f: checks.check_gitlab(f["GITLAB_URL"], f["GITLAB_TOKEN"], _split(f["GITLAB_PROJECT_IDS"])))
+        ], v, check=lambda f: checks.check_gitlab(f["GITLAB_URL"], f["GITLAB_TOKEN"],
+                                                  parse_gitlab_projects(f["GITLAB_PROJECTS"])))
         gitlab.content.addWidget(self.gitlab_form)
         gitlab.finish()
+        self.gitlab_page = gitlab
 
         # ── 4. Outlook
         outlook = StepPage("Outlook", "Réunions du calendrier Exchange. Les réunions refusées, annulées, privées "
@@ -404,8 +476,9 @@ class SetupDialog(QDialog):
                 ("EPROJET_URL", "URL", "https://e-projet.synelia.tech/EProjet-1"),
                 ("EPROJET_USERNAME", "Login", ""),
                 ("EPROJET_PASSWORD", "Mot de passe", ""),
-                Combo("EPROJET_PROJECT_ID", "Projet", catalog.EPROJET_PROJECTS,
-                      "« Charger les listes » affiche tes projets. Sinon, sur E-PROJET : Ajouter une tâche → "
+                Combo("EPROJET_PROJECT_ID", "Projet",
+                      [(v["EPROJET_PROJECT_ID"], v["EPROJET_PROJECT_ID"])] if v["EPROJET_PROJECT_ID"] else [],
+                      "« Charger les listes » affiche les projets de ton compte. Sinon, sur E-PROJET : Ajouter une tâche → "
                       "clic droit sur la liste Projet → Inspecter, et recopie la value de l'option."),
                 Combo("EPROJET_RESP_EXTERNE", "Responsable externe",
                       [(v["EPROJET_RESP_EXTERNE"], v["EPROJET_RESP_EXTERNE"])] if v["EPROJET_RESP_EXTERNE"] else [],
@@ -422,9 +495,10 @@ class SetupDialog(QDialog):
                       [(v["OSCRUM_PROJECT"], v["OSCRUM_PROJECT"])] if v["OSCRUM_PROJECT"] else [],
                       "« Charger les listes » affiche tes projets OrangeScrum."),
                 Combo("OSCRUM_TASK_TYPE_ID", "Type de tâche", catalog.OSCRUM_TYPES),
-                Combo("OSCRUM_ASSIGNEE_ID", "Personne assignée", [(catalog.OSCRUM_ME_ID, "Moi (utilisateur connecté)")],
-                      "289 = « Moi » : la tâche est assignée à l'utilisateur connecté (id propre à chaque compte). "
-                      "Pour une autre personne : « Charger les listes » puis choisis-la, ou sur OrangeScrum "
+                Combo("OSCRUM_ASSIGNEE_ID", "Personne assignée",
+                      [(v["OSCRUM_ASSIGNEE_ID"], v["OSCRUM_ASSIGNEE_ID"])] if v["OSCRUM_ASSIGNEE_ID"] else [],
+                      "« Charger les listes » puis choisis « Moi » (id propre à chaque compte) ou une autre personne. "
+                      "Sinon, sur OrangeScrum "
                       "Quick Task → clic droit sur « Assign To » → Inspecter, et recopie la value de l'option."),
             ], v, check=lambda f: checks.check_orangescrum(f["OSCRUM_URL"], f["OSCRUM_USERNAME"], f["OSCRUM_PASSWORD"]),
                 loader=catalog.fetch_orangescrum, depends={"OSCRUM_ASSIGNEE_ID": "OSCRUM_PROJECT"})),
@@ -530,6 +604,13 @@ class SetupDialog(QDialog):
         self._update_nav()
 
     def _next(self):
+        if self.steps[self.current][1] is self.gitlab_page:
+            f = self.gitlab_form.values()
+            missing = [name for name, ok in (("l'auteur des commits", f["GITLAB_AUTHOR"]),
+                                             ("au moins un projet avec sa branche", f["GITLAB_PROJECTS"])) if not ok]
+            if missing:
+                QMessageBox.warning(self, "GitLab", "Renseigne " + " et ".join(missing) + ".")
+                return
         active = self._active()
         if active.index(self.current) < len(active) - 1:
             self._go(1)

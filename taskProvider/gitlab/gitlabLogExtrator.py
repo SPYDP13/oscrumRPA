@@ -1,11 +1,13 @@
 import requests
 from datetime import datetime, timedelta
-from config import GITLAB_TOKEN, GITLAB_URL, GITLAB_AUTHOR, GITLAB_BRANCHES, GITLAB_PROJECT_IDS
+from config import GITLAB_TOKEN, GITLAB_URL, GITLAB_AUTHOR, GITLAB_PROJECTS
 from taskProvider.gitlab.syncState import get_last_since
 from dateformat import date_simple as format_date_simple, date_str as format_date_str
 
-PROJECT_IDS = GITLAB_PROJECT_IDS  # ← liste de projets (GITLAB_PROJECT_IDS dans .env)
-BRANCHES = GITLAB_BRANCHES        # ← une ou plusieurs branches (GITLAB_BRANCHES dans .env)
+# ← couples (projet, branche) — GITLAB_PROJECTS dans .env, ex. 406:preprod,404:develop
+BRANCHES_BY_PROJECT = {}
+for _pid, _branch in GITLAB_PROJECTS:
+    BRANCHES_BY_PROJECT.setdefault(_pid, []).append(_branch)
 
 headers = {
     "PRIVATE-TOKEN": GITLAB_TOKEN
@@ -29,8 +31,8 @@ class GitlabLogExtractor:
     def __init__(self, since: str = None, until: str = None):
         """since / until ("2026-10-12T00:00:00Z") : période imposée, sinon reprise depuis la dernière synchro"""
         self.gitlab_url = GITLAB_URL
-        self.project_ids = PROJECT_IDS  # ← liste
-        self.branches = BRANCHES
+        self.branches_by_project = BRANCHES_BY_PROJECT
+        self.project_ids = list(BRANCHES_BY_PROJECT)
         self.headers = headers
         self.params = {**params}
         if since:
@@ -65,9 +67,9 @@ class GitlabLogExtractor:
         return all_commits
 
     def _fetch_commits_for_project(self, project_id: str, seen_titles: set) -> list:
-        """Récupère les commits d'un projet sur chaque branche configurée (dédoublonnés par titre)"""
+        """Récupère les commits d'un projet sur chaque branche configurée pour lui (dédoublonnés par titre)"""
         commits_result = []
-        for branch in self.branches:
+        for branch in self.branches_by_project[project_id]:
             commits_result.extend(self._fetch_commits_for_branch(project_id, branch, seen_titles))
         return commits_result
 

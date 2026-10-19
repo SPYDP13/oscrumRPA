@@ -9,7 +9,6 @@ from urllib.parse import unquote
 import requests
 
 # Valeurs connues, utilisées tant que les listes n'ont pas été chargées depuis la plateforme
-EPROJET_PROJECTS = [("834", "OBF | MINI APP VAS"), ("835", "OBF | GUILYFLOW"), ("836", "OBF | ORANGE CONNECT")]
 EPROJET_TYPES = [("-8", "Autre"), ("-7", "Système"), ("-6", "Support Développement"), ("-5", "Test"),
                  ("-4", "Projet"), ("-3", "Developpement"), ("-2", "Analyse"), ("-1", "Design"),
                  ("1", "Formation"), ("2", "Support Système et Infra"), ("3", "Support Client")]
@@ -17,7 +16,6 @@ OSCRUM_TYPES = [("1", "Bug"), ("12", "Change Request"), ("16", "Design"), ("2", 
                 ("3", "Enhancement"), ("11", "Idea"), ("7", "Maintenance"), ("8", "Others"), ("15", "Projet"),
                 ("5", "Quality Assurance"), ("9", "Release"), ("4", "Research n Do"), ("14", "Support"),
                 ("13", "Systeme"), ("17", "Tache Macro"), ("6", "Unit Testing"), ("10", "Update")]
-OSCRUM_ME_ID = "289"
 
 
 def _select_options(page: str, select_id: str) -> list:
@@ -97,7 +95,7 @@ def fetch_orangescrum(values: dict) -> dict:
 
     # utilisateur connecté (« Me ») et membres de chaque projet (variable JS PUSERS)
     me = re.search(r"""SES_ID\s*=\s*["']?(\d+)""", page)
-    me = me.group(1) if me else OSCRUM_ME_ID
+    me = me.group(1) if me else None
     m = re.search(r"var PUSERS\s*=\s*(\{.*?\});", page, re.S)
     pusers = json.loads(m.group(1)) if m else {}
     users_by_project = {}
@@ -116,5 +114,6 @@ def fetch_orangescrum(values: dict) -> dict:
         "OSCRUM_PROJECT": [(n, n) for n in uniq_by_name],
         "OSCRUM_TASK_TYPE_ID": sorted(types, key=lambda o: o[1].lower()),
         "OSCRUM_ASSIGNEE_ID": users_by_project,
-        "_summary": f"{len(uniq_by_name)} projet(s), {len(types)} type(s) de tâche — ton id (Moi) : {me}",
+        "_summary": f"{len(uniq_by_name)} projet(s), {len(types)} type(s) de tâche"
+                    + (f" — ton id (Moi) : {me}" if me else ""),
     }

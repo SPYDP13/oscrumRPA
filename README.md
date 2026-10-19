@@ -95,14 +95,14 @@ Tout se règle depuis l'assistant. Répartition :
 | `TASK_REFINER` | `claude`, `gemini` ou `mistral` | `claude` |
 | `TIMESHEET_TARGET` | `eprojet` ou `orangescrum` | `eprojet` |
 | `GITLAB_URL`, `GITLAB_AUTHOR` | API GitLab, auteur des commits | |
-| `GITLAB_BRANCHES`, `GITLAB_PROJECT_IDS` | listes séparées par des virgules | `preprod` |
+| `GITLAB_PROJECTS` | couples `projet:branche` séparés par des virgules (ex. `406:preprod,404:develop`) ; une ligne par branche si un projet en suit plusieurs | |
 | `EXCHANGE_SERVER`, `EXCHANGE_EMAIL`, `EXCHANGE_USERNAME` | calendrier Outlook (login vide = adresse mail) | |
-| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET (834 MINI APP VAS · 835 GUILYFLOW · 836 ORANGE CONNECT) | `836` |
+| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET (projets propres à chaque compte : « Charger les listes » dans l'assistant) | |
 | `EPROJET_RESP_EXTERNE` | responsable externe (nom affiché) | |
-| `EPROJET_TYPE_TACHE_ID` / `EPROJET_TYPE_TACHE_REUNION_ID` | type des tâches de commits / des réunions | `-3` Développement / `-4` Projet |
+| `EPROJET_TYPE_TACHE_ID` / `EPROJET_TYPE_TACHE_REUNION_ID` | type des tâches de commits / des réunions (ex. `-3` Développement / `-4` Projet) | |
 | `OSCRUM_URL`, `OSCRUM_USERNAME`, `OSCRUM_PROJECT` | OrangeScrum (nom exact du projet) | |
-| `OSCRUM_TASK_TYPE_ID` | type de tâche | `10` Update |
-| `OSCRUM_ASSIGNEE_ID` | personne assignée — `289` = « Moi » pour le compte actuel (id propre à chaque compte) | `289` |
+| `OSCRUM_TASK_TYPE_ID` | type de tâche (ex. `10` Update) | |
+| `OSCRUM_ASSIGNEE_ID` | personne assignée — id propre à chaque compte (« Charger les listes » propose « Moi ») | |
 | `CLAUDE_CLI_PATH`, `CLAUDE_MODEL` | CLI Claude Code, modèle (vide = défaut) | `claude` |
 | `GEMINI_MODEL` | modèle Gemini | `gemini-flash-latest` |
 | `MISTRAL_AGENT_ID`, `MISTRAL_AGENT_VERSION` | agent Mistral | |
