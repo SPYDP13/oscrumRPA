@@ -1,0 +1,318 @@
+===============================================================================
+                    RPA TIMESHEET - Guide d'installation et d'utilisation
+                            (macOS, Mac Apple Silicon M1 et +)
+===============================================================================
+
+
+1. INSTALLATION
+-------------------------------------------------------------------------------
+
+IMPORTANT : copier l'application dans le dossier Applications AVANT de retirer
+la quarantaine. Ne pas la lancer depuis Téléchargements : la programmation de
+18h pointe vers l'emplacement de l'application.
+
+  Étape 1 - Décompresser
+    Double-cliquer sur "RPA Timesheet.zip". On obtient "RPA Timesheet.app" et
+    ce fichier LISEZMOI.txt.
+
+  Étape 2 - Copier dans Applications
+    Dans le Finder, glisser "RPA Timesheet.app" dans le dossier Applications
+    (barre latérale du Finder > Applications).
+
+  Étape 3 - Retirer la quarantaine
+    L'application n'est pas signée par Apple : macOS refuse de l'ouvrir
+    ("impossible de vérifier le développeur"). Ouvrir le Terminal
+    (Launchpad > Autres > Terminal) et coller cette commande, guillemets
+    compris :
+
+        xattr -dr com.apple.quarantine "/Applications/RPA Timesheet.app"
+
+    Valider avec Entrée. La commande n'affiche rien quand tout se passe bien.
+
+    Sans Terminal : ouvrir l'application une première fois (elle est bloquée),
+    puis Réglages Système > Confidentialité et sécurité > "Ouvrir quand même".
+
+  Étape 4 - Lancer
+    Ouvrir "RPA Timesheet" depuis le Launchpad ou le dossier Applications.
+
+
+2. IDÉE GÉNÉRALE
+-------------------------------------------------------------------------------
+
+RPA Timesheet remplit votre timesheet à votre place. Chaque jour ouvré à 18h :
+
+  1. Il récupère ce que vous avez fait :
+       - GitLab  : vos commits, sur les projets et branches choisis ;
+       - Outlook : vos réunions du calendrier Exchange (les réunions refusées,
+                   annulées, privées, sur la journée entière ou le week-end
+                   sont ignorées).
+
+  2. Une IA (Claude, Gemini ou Mistral) les transforme en tâches :
+       - les réunions gardent leur durée réelle ;
+       - le reste de la semaine est complété jusqu'à 40 h à partir des commits
+         (titres reformulés en français, commits similaires regroupés, durées
+         réalistes : 5 h à 12 h par jour, 0,5 h à 4 h par tâche).
+
+  3. Un navigateur piloté automatiquement crée les tâches et saisit les heures
+     dans E-PROJET ou OrangeScrum, comme vous le feriez à la main.
+
+  4. Il retient où il s'est arrêté (le "point de reprise") : l'exécution
+     suivante repart de là, rien n'est saisi deux fois.
+
+Si l'IA échoue, rien n'est saisi et le point de reprise n'avance pas.
+
+
+3. PRÉREQUIS
+-------------------------------------------------------------------------------
+
+  - Accès au réseau interne (GitLab, Exchange, E-PROJET / OrangeScrum), par
+    VPN si besoin.
+  - Un compte sur chaque service utilisé.
+  - Un token GitLab : GitLab > Préférences > Access Tokens, droit "read_api".
+  - Pour l'IA, au choix :
+       - Claude  : Claude Code installé et connecté (commande "claude").
+                   Si le test avec la commande "claude" échoue, utiliser le
+                   chemin complet de l'exécutable : taper dans le Terminal
+
+                       which claude
+
+                   et recopier le chemin affiché (ex. /Users/nom/.local/bin/claude
+                   ou /opt/homebrew/bin/claude) dans le champ "Commande Claude
+                   Code" de l'assistant (voir 5. Configuration, étape 2) ;
+       - Gemini  : une clé API (https://aistudio.google.com/app/apikey) ;
+       - Mistral : une clé API et votre propre agent Mistral, tous deux
+                   GRATUITS (voir ci-dessous).
+
+  Créer gratuitement sa clé et son agent Mistral
+    L'offre gratuite de Mistral (mode "Free" / "Experiment") donne accès à
+    l'API sans carte bancaire, avec des limites d'utilisation largement
+    suffisantes pour une exécution par jour. Mistral peut demander de vérifier
+    un numéro de téléphone. En mode gratuit, Mistral peut utiliser les
+    échanges pour entraîner ses modèles : à désactiver dans les réglages du
+    compte si besoin.
+
+    a) Créer le compte
+       Aller sur https://console.mistral.ai, créer un compte (ou se connecter
+       avec Google / Microsoft) et choisir l'offre gratuite si elle est
+       proposée.
+
+    b) Créer la clé API
+       Dans le menu de gauche : "API Keys" > "Create new key". Donner un nom
+       (ex. RPA Timesheet), une date d'expiration, puis valider.
+       COPIER LA CLÉ TOUT DE SUITE : elle n'est affichée qu'une seule fois.
+
+    c) Créer l'agent
+       Dans le menu de gauche : "Agents" > créer un nouvel agent.
+         - Nom : RPA Timesheet
+         - Modèle : mistral-large-latest (ou mistral-medium-latest)
+         - Instructions : facultatives, l'application envoie elle-même toutes
+           les consignes. Par exemple : "Tu transformes des commits et des
+           réunions en tâches de timesheet. Tu réponds uniquement en JSON."
+         - Température : basse (0.2 à 0.3) pour des réponses régulières.
+       Enregistrer / déployer l'agent, puis copier son identifiant
+       (commence par "ag_").
+
+    d) Dans l'assistant de RPA Timesheet (étape 2, Mistral) : coller la clé,
+       l'id de l'agent, laisser la version vide, puis "Tester la connexion".
+
+    (Les menus de la console Mistral peuvent légèrement changer de nom.)
+  - Environ 1 Go d'espace disque.
+
+
+4. PREMIER LANCEMENT : TÉLÉCHARGEMENT DU NAVIGATEUR
+-------------------------------------------------------------------------------
+
+L'application pilote un navigateur Chromium pour remplir le timesheet. Il n'est
+pas inclus dans le zip : au premier lancement, une fenêtre "Premier lancement"
+propose de le télécharger.
+
+  - Cliquer sur "Télécharger" (environ 350 Mo une fois installé, une seule
+    fois). La progression s'affiche dans la fenêtre.
+  - La fenêtre se ferme toute seule à la fin.
+  - En cas d'échec : vérifier la connexion internet (ou le VPN) puis
+    "Réessayer".
+  - "Plus tard" permet de configurer d'abord ; le téléchargement sera reproposé
+    au lancement suivant. Aucune saisie n'est possible sans le navigateur.
+
+
+5. CONFIGURATION (ASSISTANT EN 6 ÉTAPES)
+-------------------------------------------------------------------------------
+
+L'assistant s'ouvre au premier lancement, puis à tout moment via le bouton
+"Configuration" du tableau de bord. Rien de personnel n'est prérempli : seules
+les adresses des serveurs le sont. Chaque étape a un bouton "Tester la
+connexion" : l'utiliser avant de passer à la suite.
+
+  Étape 1 - Sources
+    Cocher GitLab, Outlook, ou les deux.
+
+  Étape 2 - Analyse IA
+    Choisir Claude, Gemini ou Mistral :
+      - Claude  : commande "claude" et modèle facultatif (sonnet, opus...).
+                  Aucune clé à saisir. Cliquer sur "Tester la connexion" : si
+                  le test échoue (commande introuvable), remplacer "claude"
+                  par le chemin complet de l'exécutable, obtenu dans le
+                  Terminal avec :
+
+                      which claude
+
+                  ex. /Users/nom/.local/bin/claude, puis retester.
+      - Gemini  : clé API et modèle.
+      - Mistral : clé API, id de l'agent (ag_...), version (vide = dernière).
+                  Voir "Créer gratuitement sa clé et son agent Mistral" dans
+                  3. Prérequis.
+
+  Étape 3 - GitLab (si coché)
+      - URL de l'API GitLab : préremplie.
+      - Auteur des commits : votre nom tel qu'affiché dans GitLab.
+      - Projets et branches : une ligne par projet, avec l'id du projet et la
+        branche à suivre. Le bouton "+ Ajouter un projet" ajoute une ligne, la
+        croix la retire. Pour suivre deux branches d'un même projet, mettre
+        deux lignes avec le même id.
+        L'id du projet est affiché sur la page d'accueil du projet dans GitLab
+        ("Project ID").
+      - Token d'accès privé : le token "read_api".
+    L'auteur et au moins un projet sont obligatoires. "Tester la connexion"
+    vérifie le token, chaque projet et l'existence de chaque branche.
+
+  Étape 4 - Outlook (si coché)
+      - Serveur Exchange : prérempli.
+      - Adresse mail.
+      - Login : laisser vide pour utiliser l'adresse mail, sinon DOMAINE\login.
+      - Mot de passe.
+
+  Étape 5 - Timesheet
+    Choisir E-PROJET ou OrangeScrum, saisir login et mot de passe, puis cliquer
+    sur "Charger les listes depuis la plateforme" : les listes se remplissent
+    avec les données de VOTRE compte.
+      - E-PROJET : projet, responsable externe (dépend du projet choisi), type
+        des tâches issues des commits, type des réunions.
+      - OrangeScrum : projet, type de tâche, personne assignée (choisir "Moi"
+        pour vous-même).
+
+  Étape 6 - Programmation
+      - "Programmer chaque jour ouvré" : notification à 17h55, exécution à
+        18h00, du lundi au vendredi.
+      - "Lancer une exécution dès l'enregistrement" : premier essai immédiat.
+    Cliquer sur "Enregistrer".
+
+  macOS demande ensuite l'accès au Trousseau (où sont rangés mots de passe,
+  token et clés, voir 7. Sécurité) : saisir le mot de passe de session du Mac
+  et répondre "Toujours autoriser". Autoriser aussi les notifications si macOS
+  le propose.
+
+
+6. EXÉCUTION
+-------------------------------------------------------------------------------
+
+Le tableau de bord affiche les sources, l'IA, le timesheet, la dernière et la
+prochaine exécution, ainsi que le journal en direct.
+
+  - Aperçu sans saisie : fait tout sauf la saisie. À utiliser la première fois
+    pour vérifier les tâches proposées par l'IA.
+  - Exécuter maintenant : exécution complète, depuis le point de reprise
+    jusqu'à aujourd'hui.
+  - Rattrapage... : saisie sur une période choisie (Du / Au), sans modifier le
+    point de reprise.
+  - Point de reprise... : date à partir de laquelle la prochaine exécution
+    saisit (choisir le lendemain du dernier jour déjà saisi).
+  - Arrêter : interrompt l'exécution en cours.
+  - Programmer 17h55 / 18h / Désactiver la programmation.
+
+Déroulement d'une exécution (visible dans le journal) :
+  1. récupération des commits et/ou réunions depuis le point de reprise ;
+  2. analyse IA et répartition des heures ;
+  3. ouverture du navigateur, connexion au timesheet, création des tâches et
+     saisie des heures jour par jour (E-PROJET : tâches passées à "Terminée",
+     100 %) ; une tâche existante de même titre est réutilisée ;
+  4. enregistrement du nouveau point de reprise ;
+  5. fin : "Terminé", ou "Échec" avec le détail dans le journal.
+
+Exécution programmée : à 17h55 une notification prévient, à 18h l'exécution
+part toute seule. Si l'exécution du jour a déjà été faite, elle est sautée. Si
+le Mac était éteint, les jours manqués sont rattrapés à l'exécution suivante.
+
+Le premier point de reprise est le lundi de la semaine d'installation.
+
+Les journaux sont aussi enregistrés dans :
+  ~/Library/Application Support/RPA Timesheet/logs/
+
+
+7. SÉCURITÉ : STOCKAGE DES INFORMATIONS SENSIBLES
+-------------------------------------------------------------------------------
+
+Informations sensibles = token GitLab, mots de passe Exchange / E-PROJET /
+OrangeScrum, clés API Gemini / Mistral.
+
+  Où elles sont rangées
+    Dans le Trousseau macOS (trousseau "session"), le coffre-fort intégré à
+    macOS, regroupées dans un seul élément nommé "eprojet-rpa" (compte
+    "secrets"). Elles ne sont jamais écrites en clair dans un fichier : si
+    l'une d'elles se trouvait dans le fichier de configuration, elle en est
+    retirée à l'enregistrement.
+
+  Comment elles sont protégées
+    - Le Trousseau est chiffré sur le disque et déverrouillé par le mot de
+      passe de session du Mac : sans ce mot de passe, il est illisible (même
+      en copiant les fichiers du Mac).
+    - Seule l'application RPA Timesheet a l'accès, grâce au "Toujours
+      autoriser" du premier lancement. Toute autre application qui voudrait
+      lire l'élément déclenche une demande de macOS, avec le mot de passe de
+      session : en cas de demande inattendue, cliquer sur "Refuser".
+    - Après une mise à jour de l'application, macOS peut redemander
+      l'autorisation une fois (l'application n'est pas signée par Apple) :
+      c'est normal, répondre de nouveau "Toujours autoriser".
+    - Les secrets ne sont jamais affichés dans le journal ni dans les
+      fichiers de logs.
+    - Ils ne sont envoyés qu'au service auquel ils appartiennent (GitLab,
+      Exchange, E-PROJET, OrangeScrum, Gemini, Mistral), en HTTPS avec
+      vérification du certificat du serveur.
+    - Le navigateur piloté démarre à chaque fois sans historique ni session
+      enregistrée : aucune connexion n'est conservée après l'exécution.
+
+  Le reste de la configuration
+    Les réglages non sensibles (adresses des serveurs, auteur, projets et
+    branches, logins, types de tâche, id de l'agent Mistral) sont dans le
+    fichier :
+        ~/Library/Application Support/RPA Timesheet/.env
+
+  À savoir
+    Les titres de vos commits et de vos réunions sont envoyés à l'IA choisie
+    (Claude, Gemini ou Mistral) pour être reformulés : choisir une IA
+    autorisée par votre entreprise pour ce type d'information.
+
+  Voir ou supprimer l'élément dans le Trousseau
+    ATTENTION : l'application "Mots de passe" de macOS ne l'affiche PAS (elle
+    ne montre que les mots de passe de sites web et de Wi-Fi). Il faut
+    l'application "Trousseaux d'accès", qui n'est plus dans Utilitaires sur
+    les macOS récents. Pour l'ouvrir, taper dans le Terminal :
+
+        open "/System/Library/CoreServices/Applications/Keychain Access.app"
+
+    Puis : à gauche, trousseau "session" ; en haut, onglet "Tous les
+    éléments" ; rechercher "eprojet". L'élément s'appelle "eprojet-rpa"
+    (type : mot de passe d'application).
+
+    Vérification depuis le Terminal (sans afficher les secrets) :
+
+        security find-generic-password -s eprojet-rpa
+
+    Pour modifier un mot de passe, passer plutôt par le bouton
+    "Configuration" de l'application.
+
+
+8. À SAVOIR
+-------------------------------------------------------------------------------
+
+  - E-PROJET n'accepte la saisie que sur les 8 derniers jours : au-delà, les
+    jours sont ignorés et listés en fin d'exécution.
+  - Mise à jour : désactiver la programmation, remplacer l'application dans
+    Applications, refaire la commande de l'étape 3 (quarantaine), réactiver la
+    programmation. La configuration et les mots de passe sont conservés.
+  - Désinstallation : désactiver la programmation, supprimer l'application ;
+    pour tout effacer, supprimer aussi le dossier
+    ~/Library/Application Support/RPA Timesheet et l'élément "eprojet-rpa" du
+    Trousseau (voir 7. Sécurité pour ouvrir Trousseaux d'accès), ou dans le
+    Terminal :
+
+        security delete-generic-password -s eprojet-rpa -a secrets
