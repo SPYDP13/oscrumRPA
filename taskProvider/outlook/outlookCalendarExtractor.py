@@ -118,5 +118,5 @@ class OutlookCalendarExtractor:
 
 if __name__ == "__main__":
     # Test en lecture seule : python -m taskProvider.outlook.outlookCalendarExtractor
-    from taskProvider.gitlab.gitlabLogExtrator import params
-    OutlookCalendarExtractor(since=params["since"], until=params["until"]).get_meetings()
+    from taskProvider.gitlab.gitlabLogExtrator import default_period
+    OutlookCalendarExtractor(*default_period()).get_meetings()

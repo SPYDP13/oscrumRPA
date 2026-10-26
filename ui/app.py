@@ -25,6 +25,7 @@ import plan_store
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
 from config import ENV_PATH, SECRET_KEYS, format_gitlab_projects, parse_gitlab_projects
 from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
+from taskRefinings.projectMapping import format_mapping, group_of, parse_mapping, resolve
 from ui import catalog, checks, scheduler, settings_store
 from ui.theme import STYLESHEET
 
@@ -154,7 +155,7 @@ class ProjectBranchesField(QWidget):
         rl.setSpacing(8)
         pid_edit, branch_edit = QLineEdit(pid), QLineEdit(branch)
         pid_edit.setPlaceholderText("ex. 406")
-        branch_edit.setPlaceholderText("ex. preprod")
+        branch_edit.setPlaceholderText("toutes les branches")
         remove = _button("✕")
         remove.setFixedWidth(36)
         remove.setToolTip("Retirer ce projet")
@@ -173,7 +174,8 @@ class ProjectBranchesField(QWidget):
             self._add_row()
 
     def pairs(self) -> list:
-        return [(p.text().strip(), b.text().strip()) for _, p, b in self.rows if p.text().strip() and b.text().strip()]
+        """Branche vide = toutes les branches du projet"""
+        return [(p.text().strip(), b.text().strip()) for _, p, b in self.rows if p.text().strip()]
 
     def value(self) -> str:
         return format_gitlab_projects(self.pairs())
@@ -396,6 +398,230 @@ class StepPage(QScrollArea):
 
 
 # ─────────────────────────────────────────────────────────────
+class MappingEditor(QWidget):
+    """Correspondance dépôts GitLab → projets E-PROJET. Une ligne par groupe (règle « groupe/* », sous-groupes
+    compris) et une par dépôt (surcharge du groupe). Les dépôts viennent de la détection (événements GitLab) et des
+    règles déjà enregistrées ; enregistré sous la forme miniapp/*=12;orange/ompi=34 (PROJECT_MAPPING)."""
+    INHERIT = "__groupe__"
+    COLS = ("Groupe / dépôt", "Commits (90 j)", "Projet E-PROJET")
+
+    def __init__(self, value: str, gitlab_values, eprojet_values):
+        """gitlab_values / eprojet_values : fonctions → valeurs actuelles des formulaires (même non enregistrées)"""
+        super().__init__()
+        self.gitlab_values, self.eprojet_values = gitlab_values, eprojet_values
+        self.rules = parse_mapping(value)
+        self.repos = []  # [{"id", "path", "name", "commits"}]
+        self.projects = [tuple(p) for p in catalog.cached_eprojet().get("projects", [])]
+        self.rows = []   # [(kind, clé, combo)] — kind : group | repo | rule
+        self.worker = None
+
+        self.btn_detect = _button("🔎  Détecter mes dépôts (90 derniers jours)")
+        self.btn_projects = _button("⟳  Charger les projets E-PROJET")
+        self.btn_detect.clicked.connect(self._detect)
+        self.btn_projects.clicked.connect(self._load_projects)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.btn_detect)
+        buttons.addWidget(self.btn_projects)
+        buttons.addStretch()
+        self.status = _label("", "hint", wrap=True)
+
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(300)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(2, 300)
+        self.preview = _label("", "hint", wrap=True)
+        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        lay.addLayout(buttons)
+        lay.addWidget(self.status)
+        lay.addWidget(self.table, 1)
+        lay.addWidget(self.preview)
+        self._rebuild()
+
+    # ── Lignes ──────────────────────────────────────────────
+    def _rebuild(self):
+        rules = {p.lower(): t for p, t in self.rules}
+        groups = {}  # groupe → [(chemin, id, commits)]
+        for r in self.repos:
+            groups.setdefault(group_of(r["path"]), []).append((r["path"], r["id"], r["commits"]))
+        known_paths = {r["path"].lower() for r in self.repos} | {r["id"] for r in self.repos}
+        others = []
+        for pattern, _ in self.rules:
+            p = pattern.lower()
+            if p.endswith("/*") and not set(p[:-2]) & set("*?["):
+                groups.setdefault(pattern[:-2], [])
+            elif p.isdigit() or set(p) & set("*?["):
+                if p not in known_paths:
+                    others.append(pattern)
+            elif p not in known_paths:
+                groups.setdefault(group_of(pattern), []).append((pattern, "", None))
+
+        self.table.setRowCount(0)
+        self.rows = []
+        bold = QFont()
+        bold.setBold(True)
+        for group in sorted(groups, key=str.lower):
+            self._add_row("group", f"{group}/*", f"📁  {group or '(sans groupe)'}  —  tout le groupe",
+                          sum(c or 0 for *_, c in groups[group]) or None, rules.get(f"{group}/*".lower(), ""), bold)
+            for path, pid, commits in sorted(groups[group], key=lambda x: x[0].lower()):
+                current = rules.get(path.lower()) or rules.get(pid) or self.INHERIT
+                self._add_row("repo", path, f"        {path.rsplit('/', 1)[-1]}", commits, current, None, pid)
+        for pattern in others:
+            self._add_row("rule", pattern, f"Règle « {pattern} »", None, rules.get(pattern.lower(), ""), None)
+        self._update_preview()
+
+    def _add_row(self, kind: str, key: str, text: str, commits, current: str, font, pid: str = ""):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        name = QTableWidgetItem(text)
+        name.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        name.setToolTip(key + (f"  (id {pid})" if pid else ""))
+        if font:
+            name.setFont(font)
+        count = QTableWidgetItem("" if commits is None else str(commits))
+        count.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.table.setItem(row, 0, name)
+        self.table.setItem(row, 1, count)
+
+        combo = QComboBox()
+        if kind == "repo":
+            combo.addItem("↳ comme le groupe", self.INHERIT)
+        else:
+            combo.addItem("—  pas de règle", "")
+        names = dict(self.projects)
+        for project_id, project_name in self.projects:
+            combo.addItem(f"{project_name} ({project_id})", project_id)
+        if current and current != self.INHERIT and current not in names:
+            combo.addItem(f"Projet {current}", current)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+        combo.currentIndexChanged.connect(self._update_preview)
+        self.table.setCellWidget(row, 2, combo)
+        self.rows.append((kind, key, combo))
+
+    # ── Valeur ──────────────────────────────────────────────
+    def value(self) -> str:
+        rules = []
+        for kind, key, combo in self.rows:
+            target = combo.currentData()
+            if target and target != self.INHERIT:
+                rules.append((key, target))
+        return format_mapping(rules)
+
+    def _update_preview(self, *_):
+        rules = parse_mapping(self.value())
+        names = dict(self.projects)
+        lines = [f"{len(rules)} règle(s) : " + ("  ·  ".join(f"{p} → {names.get(t, t)}" for p, t in rules) or "aucune")]
+        unmapped = [r["path"] for r in self.repos if resolve(rules, r["id"], r["path"]) is None]
+        if unmapped:
+            lines.append(f"⚠️ {len(unmapped)} dépôt(s) sans projet → projet par défaut : "
+                         + ", ".join(p.rsplit('/', 1)[-1] for p in unmapped[:8]) + (" …" if len(unmapped) > 8 else ""))
+        resp = (self.eprojet_values() or {}).get("EPROJET_RESP_EXTERNE", "")
+        resp_lists = catalog.cached_eprojet().get("resp", {})
+        missing = [names.get(t, t) for t in dict.fromkeys(t for _, t in rules)
+                   if resp and t in resp_lists and resp not in [n for n, _ in resp_lists[t]]]
+        if missing:
+            lines.append(f"⚠️ Le responsable externe « {resp} » n'est pas rattaché à : {', '.join(missing)}. "
+                         "La saisie échouera pour ces projets.")
+        self.preview.setText("\n".join(lines))
+
+    # ── Actions ─────────────────────────────────────────────
+    def _busy(self, text: str):
+        self.rules = parse_mapping(self.value())  # garde les choix en cours avant de reconstruire
+        self.btn_detect.setEnabled(False)
+        self.btn_projects.setEnabled(False)
+        self.status.setText(text)
+
+    def _idle(self, text: str):
+        self.btn_detect.setEnabled(True)
+        self.btn_projects.setEnabled(True)
+        self.status.setText(text)
+
+    def _detect(self):
+        g = self.gitlab_values()
+        if not (g.get("GITLAB_URL") and g.get("GITLAB_TOKEN")):
+            self.status.setText("✕  Renseigne d'abord l'URL et le token GitLab.")
+            return
+        self._busy("⏳ Lecture de tes événements GitLab…")
+        from taskProvider.gitlab.gitlabLogExtrator import discover_projects
+        self.worker = Worker(discover_projects, g["GITLAB_URL"].rstrip("/"), g["GITLAB_TOKEN"])
+        self.worker.done.connect(self._detect_done)
+        self.worker.start()
+
+    def _detect_done(self, ok: bool, data):
+        if not ok:
+            self._idle(f"✕  {data}")
+            return
+        self.repos = data
+        self._rebuild()
+        self._idle(f"✓  {len(data)} dépôt(s) où tu as poussé ces 90 derniers jours. Choisis un projet par groupe, "
+                   "et seulement si besoin un projet différent pour un dépôt.")
+
+    def _load_projects(self):
+        e = self.eprojet_values()
+        if not (e.get("EPROJET_URL") and e.get("EPROJET_USERNAME") and e.get("EPROJET_PASSWORD")):
+            self.status.setText("✕  Renseigne d'abord l'URL, le login et le mot de passe E-PROJET.")
+            return
+        self._busy("⏳ Connexion à E-PROJET et chargement des projets…")
+        self.worker = Worker(catalog.fetch_eprojet, e)
+        self.worker.done.connect(self._projects_done)
+        self.worker.start()
+
+    def _projects_done(self, ok: bool, data):
+        if not ok:
+            self._idle(f"✕  {data}")
+            return
+        self.projects = [tuple(p) for p in data.get("EPROJET_PROJECT_ID", [])]
+        self._rebuild()
+        self._idle(f"✓  {len(self.projects)} projet(s) E-PROJET.")
+
+
+class MappingDialog(QDialog):
+    """« Correspondances… » depuis le tableau de bord : modifiable à tout moment, sans repasser par l'assistant"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Correspondances GitLab → E-PROJET")
+        self.resize(900, 640)
+        v = settings_store.load()
+        self.editor = MappingEditor(v["PROJECT_MAPPING"], lambda: v, lambda: v)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(12)
+        lay.addWidget(_label("Correspondances GitLab → E-PROJET", "h2"))
+        lay.addWidget(_label(MAPPING_HELP, "subtitle", wrap=True))
+        lay.addWidget(self.editor, 1)
+        buttons = QHBoxLayout()
+        cancel, ok = _button("Annuler"), _button("Enregistrer", "primary")
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self._save)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+
+    def _save(self):
+        try:
+            settings_store.save_keys({"PROJECT_MAPPING": self.editor.value()})
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", f"Enregistrement impossible : {e}")
+            return
+        self.accept()
+
+
+MAPPING_HELP = ("Chaque dépôt GitLab est saisi dans le projet E-PROJET choisi ici. Un projet sur un groupe couvre tous "
+                "ses dépôts (sous-groupes compris) ; un dépôt peut avoir son propre projet. Un dépôt sans projet va "
+                "dans le projet par défaut (étape Timesheet) et est signalé dans le plan.")
+
+
+# ─────────────────────────────────────────────────────────────
 class SetupDialog(QDialog):
     """Assistant de configuration : étapes à gauche, formulaire à droite"""
 
@@ -408,7 +634,7 @@ class SetupDialog(QDialog):
 
         # ── 1. Sources
         sources = StepPage("Sources des tâches", "D'où viennent les tâches à saisir dans E-PROJET ? "
-                           "Les réunions gardent leur durée réelle, le reste est complété jusqu'à 40 h / semaine.")
+                           "Les réunions gardent leur durée réelle, le reste est complété jusqu'à 8 h par jour ouvré.")
         self.cb_gitlab = QCheckBox("GitLab  —  commits de tes projets")
         self.cb_outlook = QCheckBox("Outlook  —  réunions du calendrier Exchange")
         self.cb_gitlab.setChecked(v["TASK_SOURCE"] in ("gitlab", "both"))
@@ -422,8 +648,8 @@ class SetupDialog(QDialog):
         sources.finish()
 
         # ── 2. Analyse IA
-        refiner = StepPage("Analyse IA", "Le modèle reformule les commits en tâches, fusionne les doublons "
-                           "et répartit les heures sur la semaine.")
+        refiner = StepPage("Analyse IA", "Le modèle rédige les libellés des tâches à partir des vrais commits. "
+                           "Les heures sont calculées par l'application (8 h par jour), pas par le modèle.")
         self.refiner_choice = Choice({
             "claude": ("Claude\nCLI Claude Code", FormSection([
                 ("CLAUDE_CLI_PATH", "Commande Claude Code", "claude",
@@ -445,13 +671,14 @@ class SetupDialog(QDialog):
         refiner.finish()
 
         # ── 3. GitLab
-        gitlab = StepPage("GitLab", "Les commits de l'auteur sont récupérés sur chaque projet et chaque branche.")
+        gitlab = StepPage("GitLab", "Les dépôts où tu as poussé sont détectés automatiquement, toutes branches "
+                          "confondues. Tu les rattaches aux projets E-PROJET à l'étape Correspondances.")
         self.gitlab_form = FormSection([
             ("GITLAB_URL", "URL de l'API GitLab", "https://gitlab.exemple.com/api/v4"),
             ("GITLAB_AUTHOR", "Auteur des commits", "Nom tel qu'affiché dans GitLab"),
-            ProjectBranches("GITLAB_PROJECTS", "Projets et branches",
-                            "Un projet par ligne avec sa branche. Pour suivre plusieurs branches d'un même projet, "
-                            "ajoute une ligne par branche."),
+            ProjectBranches("GITLAB_PROJECTS", "Liste blanche (facultatif)",
+                            "Vide = détection automatique (recommandé). Sinon, seuls ces projets sont lus : id du "
+                            "projet, et une branche si besoin (vide = toutes les branches)."),
             ("GITLAB_TOKEN", "Token d'accès privé", "glpat-…", "GitLab → Préférences → Access Tokens, scope read_api."),
         ], v, check=lambda f: checks.check_gitlab(f["GITLAB_URL"], f["GITLAB_TOKEN"],
                                                   parse_gitlab_projects(f["GITLAB_PROJECTS"])))
@@ -479,10 +706,10 @@ class SetupDialog(QDialog):
                 ("EPROJET_URL", "URL", "https://e-projet.synelia.tech/EProjet-1"),
                 ("EPROJET_USERNAME", "Login", ""),
                 ("EPROJET_PASSWORD", "Mot de passe", ""),
-                Combo("EPROJET_PROJECT_ID", "Projet",
+                Combo("EPROJET_PROJECT_ID", "Projet par défaut",
                       [(v["EPROJET_PROJECT_ID"], v["EPROJET_PROJECT_ID"])] if v["EPROJET_PROJECT_ID"] else [],
-                      "« Charger les listes » affiche les projets de ton compte. Sinon, sur E-PROJET : Ajouter une tâche → "
-                      "clic droit sur la liste Projet → Inspecter, et recopie la value de l'option."),
+                      "Reçoit les réunions, les activités génériques et les dépôts sans correspondance. "
+                      "« Charger les listes » affiche les projets de ton compte."),
                 Combo("EPROJET_RESP_EXTERNE", "Responsable externe",
                       [(v["EPROJET_RESP_EXTERNE"], v["EPROJET_RESP_EXTERNE"])] if v["EPROJET_RESP_EXTERNE"] else [],
                       "Liste des responsables du projet choisi (après « Charger les listes »)."),
@@ -509,7 +736,13 @@ class SetupDialog(QDialog):
         timesheet.content.addWidget(self.timesheet_choice)
         timesheet.finish()
 
-        # ── 6. Programmation
+        # ── 6. Correspondances
+        mapping = StepPage("Correspondances", MAPPING_HELP)
+        self.mapping_editor = MappingEditor(v["PROJECT_MAPPING"], self.gitlab_form.values,
+                                            self.timesheet_choice.forms["eprojet"].values)
+        mapping.content.addWidget(self.mapping_editor)
+
+        # ── 7. Programmation
         schedule = StepPage("Programmation", "Les réglages sont enregistrés dans .env ; les mots de passe, "
                             "tokens et clés API dans le Trousseau macOS.")
         self.cb_schedule = QCheckBox("Programmer chaque jour ouvré : notification à 17h55, exécution à 18h00")
@@ -529,7 +762,8 @@ class SetupDialog(QDialog):
         # ── Navigation
         self.steps = [("Sources", sources, None), ("Analyse IA", refiner, None),
                       ("GitLab", gitlab, self.cb_gitlab), ("Outlook", outlook, self.cb_outlook),
-                      ("Timesheet", timesheet, None), ("Programmation", schedule, None)]
+                      ("Timesheet", timesheet, None), ("Correspondances", mapping, self.cb_gitlab),
+                      ("Programmation", schedule, None)]
         self.stack = QStackedWidget()
         for _, page, _ in self.steps:
             self.stack.addWidget(page)
@@ -610,7 +844,7 @@ class SetupDialog(QDialog):
         if self.steps[self.current][1] is self.gitlab_page:
             f = self.gitlab_form.values()
             missing = [name for name, ok in (("l'auteur des commits", f["GITLAB_AUTHOR"]),
-                                             ("au moins un projet avec sa branche", f["GITLAB_PROJECTS"])) if not ok]
+                                             ("le token d'accès", f["GITLAB_TOKEN"])) if not ok]
             if missing:
                 QMessageBox.warning(self, "GitLab", "Renseigne " + " et ".join(missing) + ".")
                 return
@@ -632,6 +866,7 @@ class SetupDialog(QDialog):
         for form in (*self.refiner_choice.forms.values(), *self.timesheet_choice.forms.values(),
                      self.gitlab_form, self.outlook_form):
             values.update(form.values())
+        values["PROJECT_MAPPING"] = self.mapping_editor.value()
         try:
             settings_store.save(values)
             scheduler.install() if self.cb_schedule.isChecked() else scheduler.uninstall()
@@ -726,8 +961,9 @@ class ResumeDialog(QDialog):
 class PlanDialog(QDialog):
     """Plan en attente de saisie : cocher / décocher, corriger titres, dates et heures. « Exécuter » saisit ce plan
     tel quel. Réunions qui se chevauchent surlignées : la plus longue est cochée par défaut."""
-    COLS = ("Saisir", "Date", "Heures", "Titre", "Source")
+    COLS = ("Saisir", "Date", "Heures", "Projet", "Titre", "Source")
     CONFLICT = QColor(245, 158, 11, 70)
+    UNMAPPED = QColor(59, 130, 246, 55)
 
     def __init__(self, plan: dict, parent=None):
         super().__init__(parent)
@@ -742,9 +978,17 @@ class PlanDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(4, 280)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(5, 280)
+
+        # Projets proposés : listes E-PROJET chargées dans la configuration + projets déjà présents dans le plan
+        names = catalog.project_names()
+        default = settings_store.load().get("EPROJET_PROJECT_ID", "")
+        ids = list(names) + [i for i in [default, *(t.get("eprojet_project_id") for t in tasks)] if i and i not in names]
+        ids = list(dict.fromkeys(ids))
+        label = lambda i: f"{names[i]} ({i})" if i in names else f"Projet {i}"
+        self.project_combos = []
 
         editable = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
         for row, task in enumerate(tasks):
@@ -753,23 +997,38 @@ class PlanDialog(QDialog):
             check.setFlags(Qt.ItemFlag.ItemIsEnabled | (Qt.ItemFlag(0) if locked else Qt.ItemFlag.ItemIsUserCheckable))
             check.setCheckState(Qt.CheckState.Checked if task.get("include", True) else Qt.CheckState.Unchecked)
             source = task.get("conflict") or ", ".join(task.get("original_commits") or [])
+            if task.get("unmapped"):
+                source = f"⚠️ dépôt sans correspondance ({task.get('project_id')}) — {source}"
             items = [check,
                      QTableWidgetItem(f"{plan_store.day_of(task):%d/%m/%Y}"),
                      QTableWidgetItem(f"{task['hours']:g}"),
+                     QTableWidgetItem(""),
                      QTableWidgetItem(task["title"]),
                      QTableWidgetItem(source)]
-            items[4].setToolTip(source)
+            items[5].setToolTip(source)
             for col, item in enumerate(items[1:], 1):
-                item.setFlags(editable if col < 4 and not locked else Qt.ItemFlag.ItemIsEnabled)
+                item.setFlags(editable if col in (1, 2, 4) and not locked else Qt.ItemFlag.ItemIsEnabled)
             for col, item in enumerate(items):
                 if locked:
                     item.setToolTip("Déjà créée ou saisie dans le timesheet : non modifiable")
                 elif task.get("conflict"):
                     item.setBackground(self.CONFLICT)
+                elif task.get("unmapped"):
+                    item.setBackground(self.UNMAPPED)
                 self.table.setItem(row, col, item)
+
+            combo = QComboBox()
+            combo.addItem("—", "")
+            for i in ids:
+                combo.addItem(label(i), i)
+            combo.setCurrentIndex(max(0, combo.findData(task.get("eprojet_project_id") or "")))
+            combo.setEnabled(not locked)
+            self.table.setCellWidget(row, 3, combo)
+            self.project_combos.append(combo)
         self.table.itemChanged.connect(self._update_totals)
 
         conflicts = sum(1 for t in tasks if t.get("conflict"))
+        unmapped = sum(1 for t in tasks if t.get("unmapped"))
         # point de reprise « J 23:59:59 » = à partir du lendemain
         day = lambda s, shift: (datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=shift)).date()
         period = f"{day(plan['since'], 1):%d/%m/%Y} → {day(plan['until'], 0):%d/%m/%Y}"
@@ -784,7 +1043,9 @@ class PlanDialog(QDialog):
             f"{'validé' if plan.get('validated') else 'non validé'}. Corrige les titres, dates (JJ/MM/AAAA) et heures, "
             "décoche ce qui ne doit pas être saisi. La prochaine exécution saisit exactement ce plan."
             + (f" ⚠️ {conflicts} réunion(s) en conflit (surlignées) : la plus longue est cochée, choisis celle à garder."
-               if conflicts else ""), "subtitle", wrap=True))
+               if conflicts else "")
+            + (f" 🔵 {unmapped} tâche(s) d'un dépôt sans correspondance (en bleu) : rangées dans le projet par défaut, "
+               "vérifie le projet." if unmapped else ""), "subtitle", wrap=True))
         lay.addWidget(self.table, 1)
         lay.addWidget(self.totals)
         buttons = QHBoxLayout()
@@ -812,16 +1073,17 @@ class PlanDialog(QDialog):
             hours = 0
         if hours <= 0:
             raise ValueError(f"ligne {row + 1} : heures « {cell(2)} » invalides")
-        title = re.sub(r"\s+", " ", re.sub(r"['’]", " ", cell(3))).strip()  # pas d'apostrophe dans E-PROJET
+        title = re.sub(r"\s+", " ", re.sub(r"['’]", " ", cell(4))).strip()  # pas d'apostrophe dans E-PROJET
         if not title:
             raise ValueError(f"ligne {row + 1} : titre vide")
-        return self.table.item(row, 0).checkState() == Qt.CheckState.Checked, day, hours, title
+        project = self.project_combos[row].currentData() or ""
+        return self.table.item(row, 0).checkState() == Qt.CheckState.Checked, day, hours, title, project
 
     def _update_totals(self, *_):
         by_day = {}
         for row in range(self.table.rowCount()):
             try:
-                checked, day, hours, _ = self._row(row)
+                checked, day, hours, _, _ = self._row(row)
             except ValueError:
                 continue
             if checked:
@@ -835,12 +1097,19 @@ class PlanDialog(QDialog):
         except ValueError as e:
             QMessageBox.warning(self, "Plan", str(e))
             return
-        for task, (checked, day, hours, title) in zip(self.plan["tasks"], rows):
+        if any(checked and not project for checked, *_, project in rows) and \
+                settings_store.load().get("TIMESHEET_TARGET") == "eprojet":
+            QMessageBox.warning(self, "Plan", "Choisis un projet pour chaque tâche cochée.")
+            return
+        for task, (checked, day, hours, title, project) in zip(self.plan["tasks"], rows):
             if plan_store.started(task):
                 continue
             task["include"] = checked
             task["hours"] = hours
             task["title"] = title
+            if project and project != task.get("eprojet_project_id"):
+                task["eprojet_project_id"] = project
+                task.pop("unmapped", None)  # projet choisi à la main
             plan_store.set_day(task, day)
         self.plan["validated"] = True
         plan_store.save(self.plan)
@@ -948,8 +1217,11 @@ class MainWindow(QMainWindow):
         header.addStretch()
         self.btn_config = _button("⚙  Configuration")
         self.btn_config.clicked.connect(self.open_setup)
+        self.btn_mapping = _button("🔗  Correspondances")
+        self.btn_mapping.clicked.connect(self.open_mapping)
         self.btn_browser = _button("🌐  Navigateur")
         self.btn_browser.clicked.connect(lambda: BrowserDialog(self).exec())
+        header.addWidget(self.btn_mapping, alignment=Qt.AlignmentFlag.AlignTop)
         header.addWidget(self.btn_browser, alignment=Qt.AlignmentFlag.AlignTop)
         header.addWidget(self.btn_config, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -1025,8 +1297,10 @@ class MainWindow(QMainWindow):
                                "mistral": f"agent {v['MISTRAL_AGENT_ID'][:14]}…"}.get(v["TASK_REFINER"], ""))
 
         target = v["TIMESHEET_TARGET"]
+        rules = len(parse_mapping(v["PROJECT_MAPPING"]))
         self.card_timesheet.set(TIMESHEET_LABELS.get(target, target),
-                                f"projet {v['EPROJET_PROJECT_ID']}" if target == "eprojet" else v["OSCRUM_PROJECT"])
+                                f"{rules} correspondance(s), défaut {catalog.project_names().get(v['EPROJET_PROJECT_ID'], v['EPROJET_PROJECT_ID'])}"
+                                if target == "eprojet" else v["OSCRUM_PROJECT"])
 
         last = get_last_run()
         resume = f"reprise au {_resume_day():%d/%m/%Y}"
@@ -1054,7 +1328,7 @@ class MainWindow(QMainWindow):
                                  "Aucun plan en attente : « Aperçu sans saisie » en prépare un")
 
         running = self.process is not None
-        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_config):
+        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_config, self.btn_mapping):
             b.setEnabled(not running)
         self.btn_plan.setEnabled(bool(plan) and not running)
         self.btn_stop.setVisible(running)
@@ -1086,6 +1360,11 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             set_resume_date(dialog.value())
             self._append(f"\n📌 Point de reprise corrigé : prochaine exécution à partir du {dialog.value():%d/%m/%Y}\n")
+            self.refresh()
+
+    def open_mapping(self):
+        if MappingDialog(self).exec() == QDialog.DialogCode.Accepted:
+            self._append("\n🔗 Correspondances enregistrées (prises en compte à la prochaine analyse)\n")
             self.refresh()
 
     def open_plan(self):

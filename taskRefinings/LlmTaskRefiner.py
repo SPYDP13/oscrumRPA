@@ -1,25 +1,37 @@
 import json
-from datetime import datetime, timedelta
+import re
 from collections import defaultdict
+from datetime import datetime
 
-from config import EPROJET_TYPE_TACHE_REUNION_ID, GITLAB_AUTHOR
+from config import (EPROJET_PROJECT_ID, EPROJET_TYPE_TACHE_REUNION_ID, GENERIC_TASKS, GITLAB_AUTHOR,
+                    PROJECT_MAPPING)
 from dateformat import date_str as format_date_str
+from taskRefinings import dayPlanner
+from taskRefinings.projectMapping import resolve
+
+MAX_TASKS_PER_BLOCK = 3
+MAX_TITLE = 150
 
 
 class LlmTaskRefiner:
     """
-    Logique commune des refiners IA : prompt, réunions (durée réelle), complément jusqu'à 40h/semaine
-    à partir des commits ou à défaut des réunions. Chaque sous-classe n'implémente que _call_llm().
+    Transforme commits et réunions en tâches de timesheet, 8 h pile par jour ouvré.
+
+    - Les heures sont calculées par le code (taskRefinings/dayPlanner.py) : réunions à leur durée réelle, reste
+      réparti entre projets selon l'activité réelle, jours sans commit comblés de manière réaliste.
+    - Chaque dépôt GitLab est rattaché à un projet E-PROJET (règles PROJECT_MAPPING, sinon projet par défaut).
+    - Le modèle ne fait que rédiger les libellés à partir des vrais commits. S'il échoue, un libellé de secours est
+      utilisé : l'IA ne bloque jamais l'exécution.
+    Chaque sous-classe n'implémente que _call_llm().
     """
     NAME = "IA"
 
     def __init__(self, commits: list, since: str, until: str, meetings: list = None):
         """
-        commits  : liste plate de tous les commits (avec project_id)
-        since    : "2026-04-20T00:00:00Z"
-        until    : "2026-05-31T23:59:59Z" (params["until"] de GitlabLogExtractor)
-        meetings : réunions Outlook (OutlookCalendarExtractor) — reprises telles quelles avec leur
-                   durée réelle, les commits complètent les heures restantes
+        commits  : commits GitLab (GitlabLogExtractor : sha, title, authored_at, project_id, project_path…)
+        since    : "2026-04-20T00:00:00Z" (ou « J 23:59:59 » : point de reprise, la période commence au lendemain)
+        until    : "2026-05-31T23:59:59Z"
+        meetings : réunions Outlook (OutlookCalendarExtractor) — reprises telles quelles avec leur durée réelle
         """
         self.commits = commits
         self.since = since
@@ -27,6 +39,8 @@ class LlmTaskRefiner:
         self.meetings = meetings or []
         self._flag_overlaps()
         self.kept_meetings = [m for m in self.meetings if m["include"]]
+        self.unmapped_repos = []
+        self.warnings = []
 
     # ─────────────────────────────────────────────────────────────
     def _flag_overlaps(self):
@@ -56,8 +70,7 @@ class LlmTaskRefiner:
 
     # ─────────────────────────────────────────────────────────────
     def execute(self) -> list:
-        working_days = self._get_working_days()
-
+        working_days = dayPlanner.working_days(self.since, self.until)
         if not working_days:
             print("❌ Aucun jour ouvrable trouvé")
             return []
@@ -65,45 +78,64 @@ class LlmTaskRefiner:
         print(f"📅 {len(working_days)} jours ouvrables")
         print(f"📝 {len(self.commits)} commits à analyser")
         print(f"📆 {len(self.meetings)} réunion(s) Outlook")
+        if not self.commits:
+            print("⚠️ Aucun commit sur la période : les journées sont comblées par le suivi des réunions et des "
+                  "activités génériques. Si tu as poussé du code, vérifie l'auteur GitLab dans la configuration.")
 
-        # Réunions : durée réelle. Le reste jusqu'aux 40h/semaine est complété par le modèle
-        # à partir des commits, ou à défaut à partir des réunions (préparation, compte rendu, suivi...)
         meeting_tasks = self._meeting_tasks(working_days)
-        if self.commits:
-            filler_tasks = self._analyse_with_llm(working_days)
-        elif any(t["include"] for t in meeting_tasks):
-            filler_tasks = self._analyse_with_llm(working_days, from_meetings=True)
-        else:
-            filler_tasks = []
+        blocks, warnings = dayPlanner.plan_days(
+            working_days, self._planner_commits(), self._meetings_by_day(), EPROJET_PROJECT_ID,
+            GENERIC_TASKS or dayPlanner.DEFAULT_GENERIC_TASKS)
+        self.warnings += warnings
 
-        result = meeting_tasks + filler_tasks
+        labels = self._write_labels([b for b in blocks if b["kind"] != "generic"])
+        result = meeting_tasks + self._tasks_from_blocks(blocks, labels)
+        self._unique_titles(result)
         self._print_summary(result)
         return result
 
     # ─────────────────────────────────────────────────────────────
-    def _meeting_hours_by_day(self) -> dict:
-        """{"2026-10-14": 1.5, ...} — heures de réunion par jour"""
-        hours = defaultdict(float)
+    def _planner_commits(self) -> list:
+        """Commits pour le calcul des heures, rattachés à leur projet E-PROJET (règle, sinon projet par défaut)"""
+        result, unmapped = [], {}
+        for c in self.commits:
+            at = datetime.fromisoformat(c["authored_at"])
+            project = resolve(PROJECT_MAPPING, c.get("project_id"), c.get("project_path", ""))
+            if project is None:
+                unmapped[c.get("project_path") or c.get("project_id")] = True
+                project = EPROJET_PROJECT_ID or None
+            result.append({"day": at.date().isoformat(), "at": at, "project": project, "title": c["title"],
+                           "repo": c.get("project_path") or str(c.get("project_id", ""))})
+        self.unmapped_repos = sorted(unmapped)
+        if self.unmapped_repos:
+            self.warnings.append("dépôt(s) sans règle de correspondance, saisis dans le projet par défaut "
+                                 f"({EPROJET_PROJECT_ID or 'non défini'}) : " + ", ".join(self.unmapped_repos))
+        return result
+
+    def _meetings_by_day(self) -> dict:
+        """{"2026-10-14": [(titre, heures), …]} — réunions gardées"""
+        by_day = defaultdict(list)
         for m in self.kept_meetings:
-            hours[datetime.strptime(m["date"].split(" ")[0], "%Y-%m-%d").strftime("%Y-%m-%d")] += m["hours"]
-        return hours
+            by_day[self._day(m["date"]).isoformat()].append((m["title"], m["hours"]))
+        return by_day
 
     # ─────────────────────────────────────────────────────────────
     def _meeting_tasks(self, working_days: list) -> list:
-        """Une tâche E-PROJET (type Projet) par réunion, avec sa durée réelle"""
+        """Une tâche E-PROJET (type réunion) par réunion, avec sa durée réelle, sur le projet par défaut"""
         result = []
         for m in self.meetings:
-            dt = datetime.strptime(m["date"].split(" ")[0], "%Y-%m-%d")
-            if dt.strftime("%Y-%m-%d") not in working_days:
+            dt = self._day(m["date"])
+            if dt.isoformat() not in working_days:
                 continue
             result.append({
                 # la date dans le titre évite les doublons des réunions récurrentes
-                "title": f"Reunion - {m['title']} ({dt:%d/%m})",
-                "dateStr": format_date_str(dt, "09:00 am"),
-                "date": f"{dt.year}-{dt.month}-{dt.day} 09:00 am",
+                "title": self._clean(f"Reunion - {m['title']}") + f" ({dt:%d/%m})",
+                **self._date_fields(dt),
                 "author": GITLAB_AUTHOR or "",
                 "hours": m["hours"],
                 "project_id": "outlook",
+                "eprojet_project_id": EPROJET_PROJECT_ID or None,
+                "kind": "meeting",
                 "type_tache_id": EPROJET_TYPE_TACHE_REUNION_ID,
                 "original_commits": [f"Outlook {m['start']}-{m['end']}"],
                 "include": m["include"],
@@ -112,143 +144,89 @@ class LlmTaskRefiner:
         return result
 
     # ─────────────────────────────────────────────────────────────
-    def _get_working_days(self) -> list:
-        """Retourne tous les jours ouvrables (lundi→vendredi) entre since et until"""
-        # Point de reprise « J 23:59:59 » (fin d'une exécution réussie) : J est déjà saisi, on commence au lendemain
-        since_dt = (datetime.strptime(self.since, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=1)).date()
-        until_dt = datetime.strptime(self.until, "%Y-%m-%dT%H:%M:%SZ").date()
+    def _write_labels(self, blocks: list) -> dict:
+        """{id du bloc: [(titre, heures), …]} rédigés par le modèle ; {} si pas de bloc ou en cas d'échec"""
+        if not blocks:
+            return {}
+        print(f"\n🤖 Rédaction des libellés par {self.NAME} ({len(blocks)} bloc(s))…")
+        raw_text = ""
+        try:
+            raw_text = self._call_llm(self._build_prompt(blocks))
+            items = self._parse_json(raw_text)
+        except Exception as e:
+            self.warnings.append(f"rédaction {self.NAME} impossible ({str(e)[:200]}) : libellés de secours utilisés")
+            if raw_text:
+                print(f"Réponse brute :\n{raw_text[:1000]}")
+            return {}
 
-        working_days = []
-        d = since_dt
-        while d <= until_dt:
-            if d.weekday() < 5:
-                working_days.append(d.strftime("%Y-%m-%d"))
-            d += timedelta(days=1)
-        return working_days
+        known = {b["id"]: b for b in blocks}
+        by_block = defaultdict(list)
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            bid = str(item.get("bloc") or item.get("block") or item.get("id") or "")
+            title = self._clean(str(item.get("title") or ""))
+            try:
+                hours = float(item.get("hours") or 0)
+            except (TypeError, ValueError):
+                hours = 0
+            if bid in known and title:
+                by_block[bid].append((title, hours))
 
-    # ─────────────────────────────────────────────────────────────
-    def _get_weeks_info(self, working_days: list) -> list:
-        """Groupe les jours par semaine ISO avec les heures cibles"""
-        week_groups = {}
-        for day_str in working_days:
-            d = datetime.strptime(day_str, "%Y-%m-%d").date()
-            week_key = d.isocalendar()[:2]
-            week_groups.setdefault(week_key, []).append(day_str)
+        labels = {}
+        for bid, entries in by_block.items():
+            entries = entries[:MAX_TASKS_PER_BLOCK]
+            weights = {i: h if h > 0 else 1 for i, (_, h) in enumerate(entries)}
+            split = dayPlanner.split_hours(known[bid]["hours"], weights)  # somme ramenée aux heures du bloc
+            labels[bid] = [(entries[i][0], h) for i, h in split.items() if h > 0]
+        missing = len(blocks) - len(labels)
+        if missing:
+            self.warnings.append(f"{missing} bloc(s) sans libellé {self.NAME} : libellé de secours utilisé")
+        return labels
 
-        meeting_hours = self._meeting_hours_by_day()
+    def _build_prompt(self, blocks: list) -> str:
+        source = [{"bloc": b["id"], "jour": b["day"], "heures": b["hours"], "nature": b["kind"],
+                   "depots": [r.rsplit("/", 1)[-1] for r in b["repos"]], "commits": b["commits"]} for b in blocks]
+        return f"""Tu rédiges des libellés de tâches de timesheet à partir de commits Git RÉELS.
+Les heures de chaque bloc sont déjà calculées : tu ne changes pas le total d'un bloc.
 
-        result = []
-        for (year, week_num), days in week_groups.items():
-            n = len(days)
-            # Semaine partielle → proportionnel à 40h, moins les heures déjà prises par les réunions
-            target_hours = round(40 * n / 5) - sum(meeting_hours.get(d, 0) for d in days)
-            result.append({
-                "semaine": f"{year}-W{week_num:02d}",
-                "jours": days,
-                "heures_cibles": max(0, target_hours),
-                "heures_reunions_par_jour": {d: meeting_hours[d] for d in days if meeting_hours.get(d)},
-                "min_par_jour": 5,
-                "max_par_jour": 12
-            })
-        return result
+## Blocs
+{json.dumps(source, ensure_ascii=False, indent=2)}
 
-    # ─────────────────────────────────────────────────────────────
-    def _build_prompt(self, working_days: list, from_meetings: bool = False) -> str:
-        weeks_info = self._get_weeks_info(working_days)
+## Pour chaque bloc
+- Produis 1 à {MAX_TASKS_PER_BLOCK} tâches. La somme de leurs heures = exactement les heures du bloc.
+- Heures en multiples de 0.25, minimum 0.5 par tâche.
+- Regroupe les commits liés dans une même tâche (ex. « fix bug », « fix bug again » → une seule tâche).
 
-        if from_meetings:
-            source_json = json.dumps(
-                [{"title": m["title"], "date": m["date"], "hours": m["hours"]} for m in self.kept_meetings],
-                ensure_ascii=False, indent=2)
-            intro = ("Il n'y a aucun commit Git sur la période. À partir de ces réunions, crée le travail "
-                     "réalisé autour d'elles pour compléter un plan de timesheet professionnel.")
-            source_title = "Réunions (déjà saisies avec leur durée réelle)"
-            source_rules = """### 2. Tâches autour des réunions
-- Crée des tâches réalistes liées aux sujets des réunions : préparation, analyse des besoins,
-  rédaction des comptes rendus et spécifications, mise en oeuvre et suivi des actions décidées
-- Ne recopie PAS la réunion elle-même (elle est déjà saisie)
-- Une tâche de préparation se place le jour de la réunion ou avant, le suivi le jour même ou après
+## Rédaction
+- Français clair et professionnel, qui décrit le travail métier, pas le code.
+- Décris UNIQUEMENT le travail visible dans les commits du bloc. N'invente aucune fonctionnalité, aucun écran,
+  aucun module qui n'apparaît pas dans les commits.
+- nature « continuation » : le bloc prolonge le travail des commits cités (faits un jour voisin). Formule-le comme
+  une suite : tests, corrections, finalisation, revue de ce travail.
+- nature « meeting_followup » : préparation, compte rendu ou suivi des réunions citées, sans inventer leur contenu.
+- INTERDIT : apostrophe (ni ' ni ’). Écris « Mise a jour ecran » plutôt que « Mise à jour de l'écran ».
+- Pas de date dans le titre (elle est ajoutée automatiquement). Titre de 120 caractères au plus.
 
-### 3. Attribution des jours
-- Assigne chaque tâche à un jour ouvrable de la liste
-- Distribue équitablement les tâches sur tous les jours disponibles
-
-### 4. Durées
-- Définis une durée réaliste par tâche (multiples de 0.5h)"""
-            example_source = '"original_commits": ["titre de la reunion source"]'
-        else:
-            source_json = json.dumps(
-                [{"title": c["title"], "date": c["date"], "project_id": c.get("project_id", "?")}
-                 for c in self.commits],
-                ensure_ascii=False, indent=2)
-            intro = "Analyse ces commits Git et crée un plan de timesheet professionnel."
-            source_title = "Commits Git à analyser"
-            source_rules = """### 2. Fusion des commits
-- Fusionne les commits similaires, liés, ou de faible valeur en une seule tâche
-- Exemples de fusion :
-  - "fix bug", "fix bug again", "fix bug final" → "Correction et stabilisation du bug X"
-  - "ajout champ A", "ajout champ B" → "Ajout des champs A et B au formulaire"
-
-### 3. Attribution des jours
-- Assigne chaque tâche à un jour ouvrable de la liste
-- Respecte l'ordre chronologique des commits originaux
-- Distribue équitablement les tâches sur tous les jours disponibles
-
-### 4. Durées
-- Définis une durée réaliste par tâche selon sa complexité (multiples de 0.5h)
-- Simple correction : 0.5h à 1h
-- Développement fonctionnel : 1.5h à 3h
-- Fonctionnalité complexe : 3h à 4h"""
-            example_source = '"original_commits": ["titre commit 1", "titre commit 2"]'
-
-        prompt = f"""
-Tu es un expert en gestion de projet informatique. {intro}
-
-## {source_title} :
-{source_json}
-
-## Informations par semaine :
-{json.dumps(weeks_info, ensure_ascii=False, indent=2)}
-
-## Instructions :
-
-### 1. Refactorisation des titres
-- Traduis et reformule chaque titre en **français clair et professionnel**
-- Le titre doit décrire la tâche métier, pas le code (ex: "fix null pointer" → "Correction erreur de reference nulle dans le module de paiement")
-- ⚠️ **INTERDIT** : N'utilise JAMAIS d'apostrophe (ni `'` ni `'`) dans les titres
-- Remplace les constructions avec apostrophe par des alternatives sans apostrophe :
-  - "de l'affichage" → "de affichage"
-  - "de l'API" → "de API"
-  - "Mise à jour de l'écran" → "Mise a jour ecran"
-  - "Correction d'une erreur" → "Correction erreur"
-  - "Intégration de l'authentification" → "Integration authentification"
-
-{source_rules}
-
-### 5. Réunions
-- Les heures de réunion (**heures_reunions_par_jour**) sont déjà saisies à part : ne crée PAS de tâche pour elles
-- Les **heures_cibles** sont déjà diminuées des heures de réunion
-- Place moins de tâches les jours chargés en réunions
-
-## Contraintes OBLIGATOIRES sur les heures :
-- ✅ Total par semaine = exactement les **heures_cibles** indiquées pour chaque semaine
-- ✅ Par jour (tâches + heures de réunion du jour) : minimum **5h**, maximum **12h**
-- ✅ Durée par tâche : entre **0.5h et 4h**
-- ✅ Utilise UNIQUEMENT les jours de la liste fournie
-
-## Format de réponse :
-Réponds UNIQUEMENT avec un tableau JSON valide. Sans markdown, sans explication, sans texte avant ou après.
-[
-  {{
-    "title": "Titre descriptif en français",
-    "date": "2026-04-20",
-    "hours": 2.0,
-    "project_id": "406",
-    {example_source}
-  }}
-]
+## Format de réponse
+Réponds UNIQUEMENT avec un tableau JSON valide, sans markdown ni texte autour :
+[{{"bloc": "b1", "title": "Titre en francais", "hours": 2.5}}]
 """
-        return prompt
+
+    @staticmethod
+    def _parse_json(raw_text: str):
+        text = raw_text.strip()
+        if "```" in text:  # balises markdown éventuelles
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):  # tableau parfois englobé dans une clé (ex. {"taches": [...]})
+            parsed = next((v for v in parsed.values() if isinstance(v, list)), None)
+            if parsed is None:
+                raise ValueError("aucun tableau de tâches dans la réponse")
+        return parsed
 
     # ─────────────────────────────────────────────────────────────
     def _call_llm(self, prompt: str) -> str:
@@ -256,97 +234,86 @@ Réponds UNIQUEMENT avec un tableau JSON valide. Sans markdown, sans explication
         raise NotImplementedError
 
     # ─────────────────────────────────────────────────────────────
-    def _analyse_with_llm(self, working_days: list, from_meetings: bool = False) -> list:
-        print(f"\n🤖 Analyse {self.NAME} en cours" + (" (à partir des réunions)..." if from_meetings else "..."))
-
-        prompt = self._build_prompt(working_days, from_meetings)
-        # print(prompt)
-        raw_text = ""
-
-        try:
-            raw_text = self._call_llm(prompt)
-
-            # Nettoyer les balises markdown si le modèle les ajoute
-            if "```" in raw_text:
-                raw_text = raw_text.split("```")[1]
-                if raw_text.startswith("json"):
-                    raw_text = raw_text[4:]
-                raw_text = raw_text.strip()
-
-            parsed = json.loads(raw_text)
-
-            # Le modèle peut renvoyer soit un tableau brut, soit un objet
-            # englobant le tableau dans une clé (ex: {"timesheet": [...]})
-            if isinstance(parsed, dict):
-                tasks_raw = next((v for v in parsed.values() if isinstance(v, list)), None)
-                if tasks_raw is None:
-                    raise ValueError(f"Aucun tableau de tâches trouvé dans la réponse du modèle : {parsed}")
-            else:
-                tasks_raw = parsed
-
-        # Sans analyse IA, la timesheet serait incomplète (ex. seulement les réunions) : on arrête tout
-        # avant la saisie, sans avancer le point de reprise
-        except json.JSONDecodeError as e:
-            print(f"Réponse brute :\n{raw_text[:1000]}")
-            raise RuntimeError(f"❌ Réponse {self.NAME} illisible (JSON invalide) : {e}") from None
-        except Exception as e:
-            raise RuntimeError(f"❌ Erreur {self.NAME} : {e}") from None
-
-        # Formater pour OrangeScrumRpa
+    def _tasks_from_blocks(self, blocks: list, labels: dict) -> list:
         result = []
-        for task in tasks_raw:
-            dt = datetime.strptime(task["date"], "%Y-%m-%d")
-
-            # Format dateStr : "Apr 20, Mon 09:00 am"
-            date_str = format_date_str(dt, "09:00 am")
-            # Format date simple : "2026-4-20 09:00 am"
-            date_simple = f"{dt.year}-{dt.month}-{dt.day} 09:00 am"
-
-            item = {
-                "title": task["title"],
-                "dateStr": date_str,
-                "date": date_simple,
-                "author": GITLAB_AUTHOR or "",
-                "hours": float(task.get("hours", 1.0)),
-                "project_id": task.get("project_id", "?"),
-                "original_commits": task.get("original_commits", [])
-            }
-            if from_meetings:
-                item["type_tache_id"] = EPROJET_TYPE_TACHE_REUNION_ID  # travail autour des réunions → Projet
-            result.append(item)
-
+        unmapped = set(self.unmapped_repos)
+        for b in blocks:
+            dt = datetime.strptime(b["day"], "%Y-%m-%d")
+            for title, hours in labels.get(b["id"]) or [(self._fallback_title(b), b["hours"])]:
+                task = {
+                    "title": f"{title[:MAX_TITLE].rstrip(' ,;:-')} ({dt:%d/%m})",
+                    **self._date_fields(dt),
+                    "author": GITLAB_AUTHOR or "",
+                    "hours": hours,
+                    "project_id": ", ".join(b["repos"]) or {"generic": "generique",
+                                                            "meeting_followup": "outlook"}.get(b["kind"], "?"),
+                    "eprojet_project_id": b["project"],
+                    "kind": b["kind"],
+                    "original_commits": ([f"suite de : {c}" for c in b["commits"]] if b["kind"] == "continuation"
+                                         else b["commits"] or ["activité générique"]),
+                    "include": True,
+                }
+                if b["kind"] == "meeting_followup":
+                    task["type_tache_id"] = EPROJET_TYPE_TACHE_REUNION_ID
+                if unmapped & set(b["repos"]):
+                    task["unmapped"] = True
+                result.append(task)
         return result
+
+    def _fallback_title(self, block: dict) -> str:
+        """Libellé sans IA, construit uniquement à partir des sources du bloc"""
+        if block["kind"] == "generic":
+            return self._clean(block["label"])
+        names = ", ".join(r.rsplit("/", 1)[-1] for r in block["repos"])
+        details = ", ".join(block["commits"][:3]) + (" …" if len(block["commits"]) > 3 else "")
+        prefix = {"commits": f"Developpement {names}", "continuation": f"Suite du travail sur {names}",
+                  "meeting_followup": "Preparation et suivi"}[block["kind"]]
+        return self._clean(f"{prefix} : {details}" if details else prefix)
+
+    @staticmethod
+    def _unique_titles(tasks: list):
+        """Deux tâches du même jour ne peuvent pas porter le même titre (reprise par titre dans E-PROJET)"""
+        seen = defaultdict(int)
+        for t in tasks:
+            seen[t["title"]] += 1
+            if seen[t["title"]] > 1:
+                t["title"] = f"{t['title']} - {seen[t['title']]}"
+
+    # ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def _clean(title: str) -> str:
+        """Pas d'apostrophe (refusée par E-PROJET), espaces normalisés"""
+        return re.sub(r"\s+", " ", re.sub(r"['’‘`]", " ", title)).strip()
+
+    @staticmethod
+    def _day(simple: str):
+        """'2026-10-5 9:05 am' → date(2026, 10, 5)"""
+        y, m, d = simple.split(" ")[0].split("-")
+        return datetime(int(y), int(m), int(d)).date()
+
+    @staticmethod
+    def _date_fields(dt) -> dict:
+        dt = datetime(dt.year, dt.month, dt.day)
+        return {"dateStr": format_date_str(dt, "09:00 am"), "date": f"{dt.year}-{dt.month}-{dt.day} 09:00 am"}
 
     # ─────────────────────────────────────────────────────────────
     def _print_summary(self, tasks: list):
         tasks = [t for t in tasks if t.get("include", True)]
-        print(f"\n✅ {len(tasks)} tâches après analyse {self.NAME}\n")
+        print(f"\n✅ {len(tasks)} tâches\n")
 
         day_map = defaultdict(list)
         for task in tasks:
-            day_key = task["date"].split(" ")[0]  # "2026-4-20"
-            day_map[day_key].append(task)
+            day_map[self._day(task["date"])].append(task)
 
-        def parse_day(day_str):
-            parts = day_str.split("-")
-            return datetime(int(parts[0]), int(parts[1]), int(parts[2]))
-
-        week_hours = defaultdict(float)
-
-        for day_str in sorted(day_map.keys(), key=parse_day):
-            day_tasks = day_map[day_str]
+        for day in sorted(day_map):
+            day_tasks = day_map[day]
             total_h = sum(t["hours"] for t in day_tasks)
-            dt = parse_day(day_str)
-            week_key = dt.isocalendar()[:2]
-            week_hours[week_key] += total_h
-
-            print(f"  {dt.strftime('%A %d %b')} : {total_h}h — {len(day_tasks)} tâche(s)")
+            status = "✅" if abs(total_h - dayPlanner.DAY_HOURS) < 0.01 else "⚠️"
+            print(f"  {status} {day:%A %d %b} : {total_h:g}h — {len(day_tasks)} tâche(s)")
             for t in day_tasks:
-                orig = ", ".join(t["original_commits"]) if t["original_commits"] else "-"
-                print(f"    • [{t['hours']}h] {t['title']}")
-                print(f"      ↳ source : {orig}")
+                flag = " ⚠️ non classé" if t.get("unmapped") else ""
+                print(f"    • [{t['hours']:g}h] [projet {t.get('eprojet_project_id') or '?'}{flag}] {t['title']}")
+                print(f"      ↳ source : {', '.join(t['original_commits']) or '-'}")
 
-        print(f"\n📊 Total heures par semaine :")
-        for (year, week_num), hours in sorted(week_hours.items()):
-            status = "✅" if hours == 40 else "⚠️"
-            print(f"  {status} Semaine {week_num} ({year}) : {hours}h")
+        for w in self.warnings:
+            print(f"⚠️ {w}")

@@ -15,8 +15,9 @@ LAST_RUN_FILE = os.path.join(APP_SUPPORT_DIR, "last_run")
 
 
 def get_last_since() -> str:
-    """Retourne le point de départ (since) : la dernière date sauvegardée. Au tout premier lancement (aucun état),
-    le lundi de la semaine en cours, enregistré aussitôt pour ne pas glisser à la semaine suivante."""
+    """Retourne le point de départ (since) : la dernière date sauvegardée. Sans état (tout premier lancement), le
+    lundi de la semaine en cours. Lecture seule : l'état n'est écrit qu'après une exécution réussie (ou par une
+    correction manuelle), jamais par un aperçu, un rattrapage ou l'ouverture de l'interface."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
@@ -24,9 +25,7 @@ def get_last_since() -> str:
             if since:
                 return since
     today = date.today()
-    since = f"{today - timedelta(days=today.weekday())}T00:00:00Z"
-    save_last_since(since)
-    return since
+    return f"{today - timedelta(days=today.weekday())}T00:00:00Z"
 
 
 def save_last_since(until: str):

@@ -1,8 +1,8 @@
 # RPA Timesheet 🤖
 
 Remplit automatiquement la timesheet (**E-PROJET** ou **OrangeScrum**) à partir des **commits GitLab** et/ou des
-**réunions du calendrier Outlook**, avec une analyse IA (**Claude**, **Gemini** ou **Mistral**) qui reformule les
-tâches et répartit **40 h par semaine**.
+**réunions du calendrier Outlook** : **8 h par jour ouvré**, réparties entre tes projets E-PROJET selon ton activité
+réelle, avec des libellés rédigés par une IA (**Claude**, **Gemini** ou **Mistral**) à partir de tes vrais commits.
 
 Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution programmée chaque jour ouvré à 18h.
 
@@ -19,17 +19,22 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
 ```
 
 1. **Extraction** depuis le dernier point de reprise jusqu'à aujourd'hui :
-   - **GitLab** : commits de l'auteur, sur chaque couple projet / branche configuré
+   - **GitLab** : commits de l'auteur sur **tous les dépôts où il a poussé** (détection par les événements GitLab,
+     toutes branches), dédoublonnés par SHA, commits de merge ignorés. Liste blanche facultative (`GITLAB_PROJECTS`)
+   - **Correspondances** : chaque dépôt est rattaché à un projet E-PROJET (règle par groupe `miniapp/*` ou par
+     dépôt) ; un dépôt sans règle va dans le **projet par défaut** et est signalé dans le plan
    - **Outlook** : réunions du calendrier Exchange (refusées, annulées, privées, journée entière et week-end ignorées).
      Réunions qui se **chevauchent** : seule la plus longue est gardée par défaut ; les autres restent dans le plan,
      décochées et surlignées, pour que tu choisisses dans l'aperçu
-2. **Analyse IA** :
-   - les **réunions** gardent leur **durée réelle** (type de tâche « Projet »)
-   - le reste jusqu'à **40 h / semaine** est complété à partir des **commits** (titres reformulés en français,
-     commits similaires fusionnés, durées réalistes) ou, s'il n'y a aucun commit, par le **travail autour des
-     réunions** (préparation, compte rendu, suivi des actions…)
-   - contraintes : 5 h à 12 h par jour, 0,5 h à 4 h par tâche, jours ouvrés uniquement
-3. **Saisie** dans la timesheet :
+2. **Heures (calculées, sans IA)** — `taskRefinings/dayPlanner.py`, **8 h pile par jour ouvré** :
+   - les **réunions** gardent leur **durée réelle** (type de tâche « Projet », projet par défaut)
+   - le reste est réparti entre projets au prorata de l'**activité réelle du jour** (durée des sessions de commits)
+   - jour sans commit : **préparation / suivi** des réunions du jour, puis **suite du travail** d'un jour voisin
+     (mêmes projets), sinon **activités génériques** sur le projet par défaut (`GENERIC_TASKS`)
+3. **Libellés (IA)** : le modèle reformule les commits de chaque bloc en 1 à 3 tâches, en français, **sans inventer**
+   de travail absent des commits. Si l'IA échoue, un libellé de secours est construit à partir des commits : l'IA
+   ne bloque plus l'exécution
+4. **Saisie** dans la timesheet :
    - **E-PROJET** : création de chaque tâche, puis dans le *Suivi quotidien* : heures du jour, statut **Terminée**,
      avancement **100 %** — une tâche active de même titre est réutilisée (pas de doublon)
    - **OrangeScrum** : *Quick Task* puis saisie dans la *Timesheet*
@@ -70,18 +75,24 @@ modèles. Vérifie que c'est compatible avec les règles du client / de l'entrep
    |---|---|
    | Sources | GitLab, Outlook ou les deux |
    | Analyse IA | Claude (CLI Claude Code, sans clé), Gemini (clé API) ou Mistral (clé API + agent) |
-   | GitLab | URL de l'API, auteur, projets avec leur branche (bouton **+ Ajouter un projet**), token |
+   | GitLab | URL de l'API, auteur, token ; liste blanche de projets facultative (vide = détection automatique) |
    | Outlook | serveur Exchange, adresse mail, login (facultatif), mot de passe |
-   | Timesheet | E-PROJET ou OrangeScrum : identifiants, projet, types de tâche, responsable / personne assignée |
+   | Timesheet | E-PROJET ou OrangeScrum : identifiants, projet par défaut, types de tâche, responsable / personne assignée |
+   | Correspondances | dépôts détectés (90 derniers jours), groupés par namespace : un projet E-PROJET par groupe, et si besoin par dépôt |
    | Programmation | notification 17h55 + exécution 18h, lancement immédiat |
 
    Aucun champ propre à l'utilisateur n'est prérempli (auteur, projets, branches, projet timesheet, responsable,
    personne assignée, types de tâche, agent Mistral) : seules les adresses des serveurs et les réglages techniques
    le sont.
 
-   **GitLab** : une ligne par projet avec sa branche ; pour suivre plusieurs branches d'un même projet, ajouter une
-   ligne par branche (✕ pour retirer une ligne). L'auteur et au moins un projet sont obligatoires pour passer
-   l'étape. *Tester la connexion* vérifie le token, chaque projet et l'existence de sa branche.
+   **GitLab** : l'auteur et le token sont obligatoires. Les dépôts sont détectés automatiquement ; la liste blanche
+   (id du projet, branche facultative) ne sert qu'à restreindre. *Tester la connexion* vérifie le token, l'accès aux
+   événements et les projets de la liste blanche.
+
+   **Correspondances** (aussi accessible depuis le tableau de bord, bouton **🔗 Correspondances**) : *Détecter mes
+   dépôts* liste les dépôts où tu as poussé ces 90 derniers jours ; choisis un projet par groupe (`groupe/*`,
+   sous-groupes compris) et, seulement si besoin, un autre projet pour un dépôt. L'aperçu signale les dépôts sans
+   projet et un responsable externe absent d'un projet choisi.
 
    Chaque étape a un bouton **Tester la connexion**. L'étape Timesheet a aussi **⟳ Charger les listes depuis la
    plateforme** : connexion avec les identifiants saisis et remplissage des listes (projets du compte connecté,
@@ -128,9 +139,11 @@ Tout se règle depuis l'assistant. Répartition :
 | `TASK_REFINER` | `claude`, `gemini` ou `mistral` | `claude` |
 | `TIMESHEET_TARGET` | `eprojet` ou `orangescrum` | `eprojet` |
 | `GITLAB_URL`, `GITLAB_AUTHOR` | API GitLab, auteur des commits | |
-| `GITLAB_PROJECTS` | couples `projet:branche` séparés par des virgules (ex. `406:preprod,404:develop`) ; une ligne par branche si un projet en suit plusieurs | |
+| `GITLAB_PROJECTS` | facultatif : liste blanche `id[:branche]` (ex. `406:preprod,404`) ; vide = détection automatique, branche vide = toutes | |
+| `PROJECT_MAPPING` | correspondances dépôt → projet E-PROJET, `motif=id` séparés par `;` (ex. `miniapp/*=12;orange/ompi=34;406=34`) ; priorité id > chemin exact > motif le plus long | |
+| `GENERIC_TASKS` | activités des jours sans commit ni réunion, séparées par `;` | revue de code, support… |
 | `EXCHANGE_SERVER`, `EXCHANGE_EMAIL`, `EXCHANGE_USERNAME` | calendrier Outlook (login vide = adresse mail) | |
-| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET (projets propres à chaque compte : « Charger les listes » dans l'assistant) | |
+| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET ; `EPROJET_PROJECT_ID` = **projet par défaut** (réunions, activités génériques, dépôts sans correspondance) | |
 | `EPROJET_RESP_EXTERNE` | responsable externe (nom affiché) | |
 | `EPROJET_TYPE_TACHE_ID` / `EPROJET_TYPE_TACHE_REUNION_ID` | type des tâches de commits / des réunions (ex. `-3` Développement / `-4` Projet) | |
 | `OSCRUM_URL`, `OSCRUM_USERNAME`, `OSCRUM_PROJECT` | OrangeScrum (nom exact du projet) | |
@@ -252,7 +265,9 @@ taskProvider/
   gitlab/                 Commits GitLab + point de reprise / marqueur last_run (syncState.py)
   outlook/                Réunions Exchange (EWS)
 taskRefinings/
-  LlmTaskRefiner.py       Logique commune : prompt, réunions, complément à 40 h
+  dayPlanner.py           Heures : 8 h / jour, réparties selon l'activité réelle (sans IA)
+  projectMapping.py       Correspondances dépôt GitLab → projet E-PROJET
+  LlmTaskRefiner.py       Logique commune : réunions, blocs d'heures, libellés rédigés par l'IA (+ secours)
   Claude|Gemini|MistralTaskRefiner.py   Appel au modèle
   factory.py              Choix selon TASK_REFINER
 taskExecutor/gitlab/      Orchestration : extraction → analyse → saisie

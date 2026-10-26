@@ -1,8 +1,10 @@
+import os
+
 import plan_store
 from taskProvider.gitlab.gitlabLogExtrator import GitlabLogExtractor
 from taskProvider.gitlab.syncState import save_last_since, save_last_run
 from taskProvider.outlook.outlookCalendarExtractor import OutlookCalendarExtractor
-from config import EXCHANGE_EMAIL, EXCHANGE_PASSWORD, TASK_SOURCE, TIMESHEET_TARGET
+from config import EPROJET_PROJECT_ID, EXCHANGE_EMAIL, EXCHANGE_PASSWORD, TASK_SOURCE, TIMESHEET_TARGET
 from taskRefinings.factory import get_refiner_class
 
 class GitlabOrangeScrumExecutor:
@@ -35,7 +37,8 @@ class GitlabOrangeScrumExecutor:
             print(f"dateStr: {c['dateStr']}")
             print(f"date   : {c['date']}")
             print(f"author : {c['author']}")
-            print(f"project: {c['project_id']}")
+            print(f"project: {c['project_id']} → E-PROJET {c.get('eprojet_project_id') or '?'}"
+                  f"{' (non classé)' if c.get('unmapped') else ''}")
             print(f"hours  : {c['hours']}")
             print(f"original_commits: {c['original_commits']}")
             print("-" * 50)
@@ -56,11 +59,25 @@ class GitlabOrangeScrumExecutor:
                 raise ValueError("TASK_SOURCE inclut outlook mais EXCHANGE_EMAIL / EXCHANGE_PASSWORD sont vides dans .env")
             meetings = OutlookCalendarExtractor(since=since, until=until).get_meetings()
 
-        # 2. Analyse IA (TASK_REFINER dans .env : claude, gemini ou mistral) : titres, jours et heures
+        # 2. Heures (8 h / jour, calculées) puis libellés rédigés par l'IA (TASK_REFINER : claude, gemini, mistral)
         refiner_class = get_refiner_class()
-        return refiner_class(commits=tasks, since=since, until=until, meetings=meetings).execute()
+        refiner = refiner_class(commits=tasks, since=since, until=until, meetings=meetings)
+        result = refiner.execute()
+        if refiner.unmapped_repos and os.environ.get("RPA_SCHEDULED"):
+            from notifier import notify
+            notify("RPA Timesheet — dépôts à classer",
+                   f"{len(refiner.unmapped_repos)} dépôt(s) saisi(s) dans le projet par défaut : "
+                   + ", ".join(r.rsplit('/', 1)[-1] for r in refiner.unmapped_repos[:5])
+                   + ". Ajoute une règle dans « Correspondances ».")
+        return result
 
     def execute(self):
+        if TIMESHEET_TARGET == "eprojet":
+            orphans = [t["title"] for t in self.taskList if not plan_store.started(t)
+                       and not (t.get("eprojet_project_id") or EPROJET_PROJECT_ID)]
+            if orphans:
+                raise RuntimeError(f"❌ {len(orphans)} tâche(s) sans projet E-PROJET (ex. « {orphans[0]} ») : choisis un "
+                                   "projet par défaut (Configuration → Timesheet) ou complète le plan (« Plan… »).")
         if self.taskList:
             # Plateforme de timesheet (TIMESHEET_TARGET dans .env) : E-PROJET ou OrangeScrum.
             # La progression est enregistrée dans le plan au fil de l'eau (reprise après échec).

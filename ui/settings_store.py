@@ -4,7 +4,8 @@ import os
 import secret_vault
 from dotenv import dotenv_values, set_key, unset_key
 
-from config import ENV_PATH, SECRET_KEYS, legacy_gitlab_projects
+from config import ENV_PATH, SECRET_KEYS, legacy_gitlab_projects, parse_gitlab_projects
+from taskRefinings.projectMapping import format_mapping, rules_from_projects
 
 # Valeurs proposées quand rien n'est encore configuré (aucune donnée propre à un utilisateur ou un projet)
 DEFAULTS = {
@@ -27,7 +28,7 @@ FIELDS = (
     "CLAUDE_CLI_PATH", "CLAUDE_MODEL",
     "GEMINI_API_KEY", "GEMINI_MODEL",
     "MISTRAL_API_KEY", "MISTRAL_AGENT_ID", "MISTRAL_AGENT_VERSION",
-    "GITLAB_URL", "GITLAB_AUTHOR", "GITLAB_PROJECTS", "GITLAB_TOKEN",
+    "GITLAB_URL", "GITLAB_AUTHOR", "GITLAB_PROJECTS", "GITLAB_TOKEN", "PROJECT_MAPPING",
     "EXCHANGE_SERVER", "EXCHANGE_EMAIL", "EXCHANGE_USERNAME", "EXCHANGE_PASSWORD",
     "TIMESHEET_TARGET",
     "EPROJET_URL", "EPROJET_USERNAME", "EPROJET_PASSWORD", "EPROJET_PROJECT_ID", "EPROJET_RESP_EXTERNE",
@@ -47,6 +48,9 @@ def load() -> dict:
             values[key] = env.get(key) or DEFAULTS.get(key, "")
     values["GITLAB_PROJECTS"] = values["GITLAB_PROJECTS"] or legacy_gitlab_projects(
         env.get("GITLAB_PROJECT_IDS"), env.get("GITLAB_BRANCHES"))
+    # Pas encore de correspondances : ancienne configuration reprise (projets listés → projet par défaut)
+    values["PROJECT_MAPPING"] = values["PROJECT_MAPPING"] or format_mapping(rules_from_projects(
+        parse_gitlab_projects(values["GITLAB_PROJECTS"]), values["EPROJET_PROJECT_ID"]))
     # Ancienne configuration OrangeScrum reprise si E-PROJET n'est pas encore renseigné
     values["EPROJET_USERNAME"] = values["EPROJET_USERNAME"] or env.get("OSCRUM_USERNAME") or ""
     values["EPROJET_PASSWORD"] = values["EPROJET_PASSWORD"] or values["OSCRUM_PASSWORD"]
@@ -69,6 +73,15 @@ def save(values: dict):
         if key in env:
             unset_key(ENV_PATH, key)
     set_key(ENV_PATH, "UI_CONFIGURED", "1", quote_mode="never")
+
+
+def save_keys(values: dict):
+    """Enregistre seulement ces réglages (hors secrets), sans toucher au reste du .env"""
+    if not os.path.exists(ENV_PATH):
+        open(ENV_PATH, "w").close()
+    for key, value in values.items():
+        if key in FIELDS and key not in SECRET_KEYS:
+            set_key(ENV_PATH, key, (value or "").strip(), quote_mode="never")
 
 
 def is_configured() -> bool:

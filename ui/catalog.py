@@ -2,11 +2,30 @@
 pour préremplir les listes déroulantes de la configuration. Lecture seule : rien n'est créé."""
 import html
 import json
+import os
 import re
 
 from urllib.parse import unquote
 
 import requests
+
+from app_paths import DATA_DIR
+
+# Dernières listes E-PROJET chargées : noms des projets (écran Correspondances, plan) et responsables par projet
+EPROJET_CACHE = os.path.join(DATA_DIR, ".eprojet_lists.json")
+
+
+def cached_eprojet() -> dict:
+    """{"projects": [[id, nom]], "resp": {id: [[nom, libellé]]}} — vide si les listes n'ont jamais été chargées"""
+    try:
+        with open(EPROJET_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def project_names() -> dict:
+    return {str(pid): name for pid, name in cached_eprojet().get("projects", [])}
 
 # Valeurs connues, utilisées tant que les listes n'ont pas été chargées depuis la plateforme
 EPROJET_TYPES = [("-8", "Autre"), ("-7", "Système"), ("-6", "Support Développement"), ("-5", "Test"),
@@ -56,6 +75,11 @@ def fetch_eprojet(values: dict) -> dict:
         resp_by_project[pid] = [(f"{p['nom']} {p['prenoms']}".strip(),
                                  f"{p['nom']} {p['prenoms']}  ·  {p.get('fonction') or p.get('structureLibelle') or ''}".strip(" ·"))
                                 for p in people]
+    try:
+        with open(EPROJET_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"projects": projects, "resp": resp_by_project}, f, ensure_ascii=False)
+    except OSError:
+        pass  # le cache ne sert qu'à l'affichage
     return {
         "EPROJET_PROJECT_ID": projects,
         "EPROJET_TYPE_TACHE_ID": types,

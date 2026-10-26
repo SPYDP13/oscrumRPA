@@ -73,6 +73,7 @@ def _scheduled(args) -> int:
     print(f"\n===== {datetime.now():%d/%m/%Y %H:%M:%S} — exécution programmée =====")
 
     notify("RPA Timesheet", "Exécution en cours…")
+    os.environ["RPA_SCHEDULED"] = "1"  # notifications supplémentaires (ex. dépôts sans correspondance)
     try:
         code = _run(args)
     except Exception as e:

@@ -37,17 +37,18 @@ def check_config():
 
 
 def parse_gitlab_projects(raw: str) -> list:
-    """« 406:preprod,404:develop » → [("406", "preprod"), ("404", "develop")]"""
+    """« 406:preprod,404:develop,410 » → [("406", "preprod"), ("404", "develop"), ("410", "")]
+    (branche vide = toutes les branches)"""
     pairs = []
     for item in (raw or "").split(","):
         pid, _, branch = item.partition(":")
-        if pid.strip() and branch.strip():
+        if pid.strip():
             pairs.append((pid.strip(), branch.strip()))
     return pairs
 
 
 def format_gitlab_projects(pairs: list) -> str:
-    return ",".join(f"{pid}:{branch}" for pid, branch in pairs)
+    return ",".join(f"{pid}:{branch}" if branch else pid for pid, branch in pairs)
 
 
 def legacy_gitlab_projects(project_ids: str, branches: str) -> str:
@@ -86,7 +87,8 @@ OSCRUM_ASSIGNEE_ID  = os.getenv("OSCRUM_ASSIGNEE_ID")  # id de la personne assig
 GITLAB_URL         = os.getenv("GITLAB_URL", "https://gitlab.orange.bf/api/v4")
 GITLAB_TOKEN       = get_secret("GITLAB_TOKEN")
 GITLAB_AUTHOR      = os.getenv("GITLAB_AUTHOR")
-# Couples projet:branche (un projet peut apparaître avec plusieurs branches)
+# Facultatif : liste blanche de projets (id[:branche], branche vide = toutes). Vide = détection automatique des
+# dépôts où l'utilisateur a poussé sur la période (événements GitLab)
 GITLAB_PROJECTS    = parse_gitlab_projects(os.getenv("GITLAB_PROJECTS") or legacy_gitlab_projects(
     os.getenv("GITLAB_PROJECT_IDS"), os.getenv("GITLAB_BRANCHES")))
 
@@ -94,6 +96,7 @@ GITLAB_PROJECTS    = parse_gitlab_projects(os.getenv("GITLAB_PROJECTS") or legac
 EPROJET_URL      = os.getenv("EPROJET_URL", "https://e-projet.synelia.tech/EProjet-1")
 EPROJET_USERNAME = os.getenv("EPROJET_USERNAME") or OSCRUM_USERNAME
 EPROJET_PASSWORD = get_secret("EPROJET_PASSWORD") or OSCRUM_PASSWORD
+# Projet par défaut : réunions, activités génériques, dépôts sans règle de correspondance
 EPROJET_PROJECT_ID      = os.getenv("EPROJET_PROJECT_ID")
 EPROJET_RESP_EXTERNE    = os.getenv("EPROJET_RESP_EXTERNE")
 EPROJET_TYPE_TACHE_ID   = os.getenv("EPROJET_TYPE_TACHE_ID", "-3")         # Developpement
@@ -109,3 +112,13 @@ EXCHANGE_PASSWORD = get_secret("EXCHANGE_PASSWORD")
 
 # Source des tâches : "gitlab" (commits), "outlook" (réunions du calendrier) ou "both" (les deux)
 TASK_SOURCE = _choice("TASK_SOURCE", "gitlab", ("gitlab", "outlook", "both"))
+
+# Correspondance dépôts GitLab → projets E-PROJET (taskRefinings/projectMapping.py), ex. « miniapp/*=12;406=34 ».
+# Vide : ancienne configuration reprise (projets de GITLAB_PROJECTS → projet par défaut)
+from taskRefinings.projectMapping import parse_mapping as _parse_mapping, rules_from_projects as _rules_from_projects
+
+PROJECT_MAPPING = (_parse_mapping(os.getenv("PROJECT_MAPPING"))
+                   or _rules_from_projects(GITLAB_PROJECTS, EPROJET_PROJECT_ID))
+
+# Activités génériques (jours sans commit ni réunion), séparées par des « ; » — vide = liste par défaut
+GENERIC_TASKS = [t.strip() for t in os.getenv("GENERIC_TASKS", "").split(";") if t.strip()]

@@ -124,7 +124,10 @@ class EProjetRpa:
         page.wait_for_load_state("networkidle")
 
         # ── Projet : sélection "à la main" pour que la page charge les champs qui en dépendent
-        self._select_bootstrap(page, "taches_projetId", EPROJET_PROJECT_ID)
+        project_id = task.get('eprojet_project_id') or EPROJET_PROJECT_ID
+        if not project_id:
+            raise RuntimeError(f"❌ Aucun projet E-PROJET pour '{task['title']}' (projet par défaut non configuré)")
+        self._select_bootstrap(page, "taches_projetId", project_id)
         page.wait_for_load_state("networkidle")
         page.wait_for_function("document.querySelectorAll('#taches_statutTacheId option').length > 1")
         page.wait_for_timeout(500)
@@ -187,7 +190,11 @@ class EProjetRpa:
         page.locator(".select2-container--open .select2-search__field").press_sequentially(
             EPROJET_RESP_EXTERNE, delay=50)
         option = page.locator(loaded).get_by_text(EPROJET_RESP_EXTERNE, exact=True)
-        option.wait_for()
+        try:
+            option.wait_for(timeout=20000)
+        except Exception:
+            raise RuntimeError(f"❌ Responsable externe « {EPROJET_RESP_EXTERNE} » introuvable dans la liste de ce "
+                               "projet E-PROJET : il n'est peut-être pas rattaché à ce projet") from None
         option.click()
         page.wait_for_timeout(300)
 
@@ -195,8 +202,11 @@ class EProjetRpa:
     def _select_bootstrap(self, page: Page, select_id: str, value: str):
         """Sélectionne une option d'un bootstrap-select en cliquant comme un utilisateur"""
         text = page.eval_on_selector(f"#{select_id}",
-                                     "(s, v) => [...s.options].find(o => o.value === v).text.trim()",
+                                     "(s, v) => ([...s.options].find(o => o.value === v) || {text: ''}).text.trim()",
                                      str(value))
+        if not text:
+            raise RuntimeError(f"❌ Valeur « {value} » absente de la liste {select_id} dans E-PROJET "
+                               "(projet ou type inaccessible avec ce compte ? Recharge les listes dans la configuration)")
         button = page.locator(f'button[data-id="{select_id}"]')
         button.click()
         menu = button.locator("xpath=..").locator(".dropdown-menu")

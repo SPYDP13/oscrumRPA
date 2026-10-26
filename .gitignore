@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 .sync_state.json
 .plan.json
+.eprojet_lists.json
 logs/
 build/
 dist/
