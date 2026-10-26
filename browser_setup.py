@@ -2,6 +2,7 @@
 dans les données utilisateur (PLAYWRIGHT_BROWSERS_PATH, défini par app_paths)."""
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,18 +15,29 @@ def _chromium_revision() -> str:
     return next(b["revision"] for b in json.loads(browsers.read_text())["browsers"] if b["name"] == "chromium")
 
 
+def _revision_dir() -> Path:
+    return Path(BROWSERS_DIR) / f"chromium-{_chromium_revision()}"
+
+
 def is_installed() -> bool:
+    """Vérifie l'exécutable lui-même : le dossier et le marqueur INSTALLATION_COMPLETE de Playwright peuvent
+    survivre à la suppression du navigateur (nettoyage macOS, antivirus…)"""
     if not FROZEN:
         return True  # en développement : navigateur installé par `playwright install` (cache par défaut)
-    return (Path(BROWSERS_DIR) / f"chromium-{_chromium_revision()}").is_dir()
+    folder = _revision_dir()
+    patterns = ("chrome-win*/chrome.exe",) if IS_WINDOWS else ("chrome-mac*/*.app/Contents/MacOS/*", "chrome-linux*/chrome")
+    return any(any(folder.glob(pattern)) for pattern in patterns)
 
 
-def install(output=print) -> bool:
+def install(output=print, force: bool = False) -> bool:
     """Télécharge Chromium (≈ 150 Mo) ; output reçoit chaque ligne de progression.
+    Une installation cassée (ou force=True) est d'abord supprimée : Playwright la croirait complète à cause de son marqueur.
     --no-shell : pas de « Chrome Headless Shell » (≈ 250 Mo), inutile car le RPA ouvre un navigateur visible"""
     from playwright._impl._driver import compute_driver_executable, get_driver_env
 
     os.makedirs(BROWSERS_DIR, exist_ok=True)
+    if (force or not is_installed()) and _revision_dir().exists():
+        shutil.rmtree(_revision_dir(), ignore_errors=True)
     node, cli = compute_driver_executable()
     proc = subprocess.Popen([node, cli, "install", "--no-shell", "chromium"], env=get_driver_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",

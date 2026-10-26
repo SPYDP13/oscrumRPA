@@ -1,10 +1,12 @@
 import math
+from urllib.parse import urljoin
 from collections import defaultdict
 from datetime import datetime
 
 from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 
+from RPA.capture import save_failure
 from config import (EPROJET_URL, EPROJET_USERNAME, EPROJET_PASSWORD, EPROJET_PROJECT_ID,
                     EPROJET_RESP_EXTERNE, EPROJET_TYPE_TACHE_ID, EPROJET_STATUT_TACHE_ID,
                     EPROJET_STATUT_TERMINEE_ID)
@@ -19,12 +21,17 @@ class EProjetRpa:
       2. Pour chaque tâche : "Ajouter une tâche" → formulaire /taches/useform
       3. "Suivi quotidien des tâches" : pour chaque jour, saisie des heures sur la ligne de la tâche
          ⚠️ La plateforme ne propose que les 8 derniers jours (aujourd'hui inclus).
+
+    Progression notée dans chaque tâche (eprojet_id, done) et signalée par on_progress (enregistrement du plan) :
+    une relance après échec ne recrée pas les tâches et ne ressaisit pas les heures déjà faites.
+    Saisie incomplète (jour hors fenêtre, ligne introuvable) → exception en fin d'exécution.
     """
 
     ACTIVITY_PATH = "/timeSheetTacheParJour/activity"
 
-    def __init__(self, task_list: list):
+    def __init__(self, task_list: list, on_progress=None):
         self.taskList = task_list
+        self.on_progress = on_progress or (lambda: None)
         print("====== Les taches a ajouter =====")
         for task in self.taskList:
             print(f"title  : {task['title']}")
@@ -34,25 +41,55 @@ class EProjetRpa:
             print("-" * 50)
 
     def create_tasks(self):
-
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
             page = browser.new_page()
+            try:
+                problems = self._run(page)
+            except Exception:
+                save_failure(page, "eprojet")
+                raise
+            finally:
+                browser.close()
 
-            self._login(page)
+        if problems:
+            raise RuntimeError("❌ Saisie incomplète — " + " ; ".join(problems) +
+                               ". Le point de reprise n'avance pas et le plan est conservé : corrige-le (« Plan… » : "
+                               "changer la date ou décocher la tâche) puis relance.")
+        print("\n🎉 Tous les timesheets ont été remplis !")
 
-            # Création des tâches
-            for i, task in enumerate(self.taskList):
-                print(f"\n[{i + 1}/{len(self.taskList)}] Création : {task['title']}")
-                self._create_task(page, task)
-                print(f"Tâche créée : {task['title']} (id={task.get('eprojet_id')})")
+    def _run(self, page: Page) -> list:
+        self._login(page)
 
-            print(f"\n🎉 {len(self.taskList)} tâche(s) créée(s) avec succès !")
+        # Jours ouverts à la saisie : une tâche hors fenêtre n'est pas créée (elle resterait sans heures)
+        day_urls = self._day_urls(page)
+        pending = [t for t in self.taskList if not t.get('done')]
+        in_window = [t for t in pending if self._parse_day(t['date']).strftime("%d-%m-%Y") in day_urls]
+        out_of_window = [t for t in pending if all(t is not w for w in in_window)]
 
-            # Remplissage des timesheets
-            self.add_time_sheet(page, self.taskList)
+        # Création des tâches
+        for i, task in enumerate(in_window):
+            print(f"\n[{i + 1}/{len(in_window)}] Création : {task['title']}")
+            if task.get('eprojet_id'):
+                print(f"  ↪ Déjà créée lors d'une exécution précédente (id={task['eprojet_id']})")
+                continue
+            self._create_task(page, task)
+            self.on_progress()
+            print(f"Tâche créée : {task['title']} (id={task.get('eprojet_id')})")
 
-            browser.close()
+        print(f"\n🎉 {len(in_window)} tâche(s) prête(s) !")
+
+        # Remplissage des timesheets
+        missing = self.add_time_sheet(page, in_window, day_urls)
+
+        problems = []
+        if out_of_window:
+            days = sorted({self._parse_day(t['date']) for t in out_of_window})
+            problems.append(f"{len(out_of_window)} tâche(s) hors de la fenêtre de saisie E-PROJET (8 derniers jours) : "
+                            + ", ".join(d.strftime('%d/%m/%Y') for d in days))
+        if missing:
+            problems.append(f"ligne introuvable dans le suivi quotidien pour : {', '.join(missing)}")
+        return problems
 
     # ─────────────────────────────────────────────────────────────
     def _login(self, page: Page):
@@ -167,57 +204,50 @@ class EProjetRpa:
         page.wait_for_timeout(300)
 
     # ─────────────────────────────────────────────────────────────
-    def add_time_sheet(self, page: Page, task_list: list):
-        """
-        Reçoit une liste de tâches déjà schedulées (date + hours assignés).
-        Groupe par jour et saisit les heures dans le suivi quotidien.
-        """
-        if not task_list:
-            print("❌ Aucune tâche à planifier")
-            return
-
-        # Grouper les tâches par jour
-        day_map = defaultdict(list)
-        for task in task_list:
-            day_map[self._parse_day(task['date'])].append(task)
-
-        # Jours disponibles : {"16-10-2026": "/EProjet-1/timeSheetTacheParJour/activityByDay/395", ...}
+    def _day_urls(self, page: Page) -> dict:
+        """Jours disponibles : {"16-10-2026": "/EProjet-1/timeSheetTacheParJour/activityByDay/395", ...}"""
         page.goto(f"{EPROJET_URL}{self.ACTIVITY_PATH}")
-        day_urls = page.evaluate("""
+        return page.evaluate("""
         () => Object.fromEntries(
             [...document.querySelectorAll('#timeSheetTachePar_timeSheetJourId_tabActivityStarted option')]
                 .map(o => [o.text.trim().split(' ').pop(), o.value]))
         """)
 
-        skipped = []
+    # ─────────────────────────────────────────────────────────────
+    def add_time_sheet(self, page: Page, task_list: list, day_urls: dict) -> list:
+        """
+        Reçoit une liste de tâches déjà schedulées (date + hours assignés), toutes dans la fenêtre de saisie.
+        Groupe par jour et saisit les heures dans le suivi quotidien. Retourne les titres des lignes introuvables.
+        """
+        day_map = defaultdict(list)
+        for task in task_list:
+            day_map[self._parse_day(task['date'])].append(task)
+
+        missing = []
         for dt in sorted(day_map.keys()):
             tasks_for_day = day_map[dt]
-            url = day_urls.get(dt.strftime("%d-%m-%Y"))
-            if not url:
-                skipped.append(dt)
-                print(f"\n⚠️ {dt.strftime('%A %d %b')} hors de la fenêtre de saisie E-PROJET, ignoré")
-                continue
-
             total_h = round(sum(t['hours'] for t in tasks_for_day), 2)
             print(f"\n📅 {dt.strftime('%A %d %b')} → {total_h}h — {len(tasks_for_day)} tâche(s)")
 
-            page.goto(f"{EPROJET_URL.split('/EProjet-1')[0]}{url}")
+            # url relative à l'hôte (elle contient déjà le chemin de l'application)
+            page.goto(urljoin(EPROJET_URL, day_urls[dt.strftime("%d-%m-%Y")]))
             page.wait_for_selector("#timeSheetTacheParJourActivityUserByProjet")
 
-            filled = 0
+            filled = []
             for task in tasks_for_day:
                 if self._fill_timesheet_row(page, task, task['hours']):
-                    filled += 1
+                    filled.append(task)
+                else:
+                    missing.append(task['title'])
 
             if filled:
                 page.click('#timeSheetTacheParJourActivityUserByProjet button[type="submit"]')
                 page.wait_for_load_state("networkidle")
-                print(f"  ✅ Sauvegardé ({filled} ligne(s))")
-
-        if skipped:
-            print(f"\n⚠️ {len(skipped)} jour(s) non saisi(s) (plus de 7 jours) : "
-                  f"{', '.join(d.strftime('%d/%m/%Y') for d in skipped)}")
-        print("\n🎉 Tous les timesheets ont été remplis !")
+                for task in filled:
+                    task['done'] = True
+                self.on_progress()
+                print(f"  ✅ Sauvegardé ({len(filled)} ligne(s))")
+        return missing
 
     # ─────────────────────────────────────────────────────────────
     def _fill_timesheet_row(self, page: Page, task: dict, hours: float) -> bool:

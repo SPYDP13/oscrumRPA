@@ -4,7 +4,8 @@
   --run [--since …]      exécute le RPA (lancé par l'interface)
   --scheduled            exécution programmée de 18h : sautée si déjà faite aujourd'hui, notifications
   --notify-upcoming      notification de 17h55 (sautée si l'exécution du jour est déjà faite)
-  --install-browser      télécharge le navigateur Chromium de Playwright
+  --install-browser      télécharge le navigateur Chromium de Playwright (répare une installation cassée)
+  --reinstall-browser    supprime puis retélécharge Chromium
   --diagnostic           affiche les chemins et l'état de l'installation
 """
 import argparse
@@ -130,11 +131,12 @@ def main() -> int:
     mode.add_argument("--scheduled", action="store_true", help="exécution programmée (18h)")
     mode.add_argument("--notify-upcoming", action="store_true", help="notification de 17h55")
     mode.add_argument("--install-browser", action="store_true", help="télécharge Chromium")
+    mode.add_argument("--reinstall-browser", action="store_true", help="retélécharge Chromium")
     mode.add_argument("--diagnostic", action="store_true", help="affiche l'état de l'installation")
     add_run_arguments(parser)
     args, _ = parser.parse_known_args()  # macOS peut ajouter des arguments (-psn_…) au lancement d'une .app
 
-    if not (args.run or args.scheduled or args.notify_upcoming or args.install_browser or args.diagnostic):
+    if not (args.run or args.scheduled or args.notify_upcoming or args.install_browser or args.reinstall_browser or args.diagnostic):
         from ui.app import main as ui_main
         return ui_main()
 
@@ -147,9 +149,9 @@ def main() -> int:
             return _scheduled(args)
         if args.notify_upcoming:
             return _notify_upcoming()
-        if args.install_browser:
+        if args.install_browser or args.reinstall_browser:
             import browser_setup
-            return 0 if browser_setup.install() else 1
+            return 0 if browser_setup.install(force=args.reinstall_browser) else 1
         return _diagnostic()
     except Exception as e:
         # message lisible dans le journal (sans fenêtre d'erreur PyInstaller sous Windows)

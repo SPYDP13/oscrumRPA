@@ -20,7 +20,9 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
 
 1. **Extraction** depuis le dernier point de reprise jusqu'à aujourd'hui :
    - **GitLab** : commits de l'auteur, sur chaque couple projet / branche configuré
-   - **Outlook** : réunions du calendrier Exchange (refusées, annulées, privées, journée entière et week-end ignorées)
+   - **Outlook** : réunions du calendrier Exchange (refusées, annulées, privées, journée entière et week-end ignorées).
+     Réunions qui se **chevauchent** : seule la plus longue est gardée par défaut ; les autres restent dans le plan,
+     décochées et surlignées, pour que tu choisisses dans l'aperçu
 2. **Analyse IA** :
    - les **réunions** gardent leur **durée réelle** (type de tâche « Projet »)
    - le reste jusqu'à **40 h / semaine** est complété à partir des **commits** (titres reformulés en français,
@@ -31,10 +33,31 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
    - **E-PROJET** : création de chaque tâche, puis dans le *Suivi quotidien* : heures du jour, statut **Terminée**,
      avancement **100 %** — une tâche active de même titre est réutilisée (pas de doublon)
    - **OrangeScrum** : *Quick Task* puis saisie dans la *Timesheet*
+   - **plan** : le résultat de l'analyse est enregistré (`.plan.json`) et c'est **ce plan** qui est saisi — voir
+     [Plan de saisie](#plan-de-saisie)
 4. **Point de reprise** enregistré : la prochaine exécution repart de là. Au premier lancement, il est fixé au
    **lundi de la semaine en cours** ; il se corrige avec le bouton **Point de reprise…**.
 
-Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pas.
+Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pas. Si la saisie est **incomplète**
+(erreur GitLab, jour hors de la fenêtre E-PROJET, ligne introuvable, plantage du navigateur), l'exécution échoue,
+le point de reprise n'avance pas et le plan est conservé : la relance reprend là où elle s'était arrêtée.
+
+### Plan de saisie
+- **Aperçu sans saisie** prépare le plan puis l'ouvre (**📋 Plan…**) : cocher / décocher, corriger titres, dates et
+  heures, choisir parmi les réunions en conflit, puis **Valider**. Les apostrophes sont retirées des titres.
+- **Exécuter** saisit exactement le plan en attente, sans rappeler l'IA. Sans plan, il en génère un (réunions en
+  conflit : la plus longue) et le saisit directement — c'est le cas de l'exécution programmée de 18h.
+- Un aperçu brut (non validé, rien de saisi) d'un jour précédent est régénéré pour inclure les derniers commits ;
+  un plan validé ou en partie saisi est toujours repris. **Abandonner le plan** force une nouvelle analyse.
+- La progression (tâche créée, heures saisies) est notée dans le plan : une relance ne recrée pas les tâches.
+- En cas d'échec du navigateur, une capture (`logs/echec_…png` + `.html`) est enregistrée.
+
+### Confidentialité des appels IA
+L'analyse envoie au service d'IA choisi les **titres des commits**, les **titres et horaires des réunions** et
+l'id des projets GitLab (jamais le code, ni les identifiants). Avec **Gemini** ou **Mistral**, ces données partent
+chez un tiers (Google, Mistral AI) ; avec une clé Gemini **gratuite**, Google peut les utiliser pour améliorer ses
+modèles. Vérifie que c'est compatible avec les règles du client / de l'entreprise avant de choisir un fournisseur ;
+**Claude** passe par le CLI Claude Code et le compte qui y est connecté.
 
 ---
 
@@ -68,7 +91,8 @@ Si l'analyse IA échoue, **rien n'est saisi** et le point de reprise n'avance pa
 
 ### Tableau de bord
 - Cartes : sources, analyse IA, timesheet, dernière exécution, prochaine exécution
-- **▶ Exécuter maintenant** · **Aperçu sans saisie** (analyse seule, rien n'est envoyé) · **Rattrapage…** (période
+- **▶ Exécuter maintenant** · **Aperçu sans saisie** (prépare le plan, rien n'est saisi) · **📋 Plan…** (relire /
+  corriger le plan en attente) · **Rattrapage…** (période
   choisie, sans toucher au point de reprise) · **Point de reprise…** (date à partir de laquelle la prochaine
   exécution saisit, par exemple après un rattrapage) · **Arrêter** · **Programmer / Désactiver** · **Configuration**
 - Journal en direct, aussi enregistré dans `logs/rpa_AAAA-MM-JJ.log`
@@ -80,7 +104,7 @@ Même exécutable (ou `python rpa_timesheet.py` en développement) :
 |---|---|
 | *(sans argument)* | ouvre l'interface |
 | `--run` | exécution complète |
-| `--run --dry-run` | aperçu : analyse sans saisie |
+| `--run --dry-run` | aperçu : prépare le plan (`.plan.json`) sans saisie |
 | `--run --since 2026-10-12 --until 2026-10-16` | rattrapage sur une période (point de reprise inchangé) |
 | `--scheduled` | exécution programmée (sautée si déjà faite aujourd'hui, notifications) |
 | `--notify-upcoming` | notification de 17h55 |
@@ -171,7 +195,7 @@ désactiver puis réactiver la programmation (et la désactiver avant de désins
 
 | | Développement | Application packagée |
 |---|---|---|
-| `.env`, point de reprise (`.sync_state.json`), `logs/` | dossier du projet | macOS `~/Library/Application Support/RPA Timesheet` · Windows `%LOCALAPPDATA%\RPA Timesheet` |
+| `.env`, point de reprise (`.sync_state.json`), plan en attente (`.plan.json`), `logs/` | dossier du projet | macOS `~/Library/Application Support/RPA Timesheet` · Windows `%LOCALAPPDATA%\RPA Timesheet` |
 | Marqueur `last_run` | `~/Library/Application Support/RPA Timesheet` · `%LOCALAPPDATA%\RPA Timesheet` | idem |
 | Navigateur Chromium | cache Playwright par défaut | `…/RPA Timesheet/ms-playwright` |
 
@@ -249,8 +273,8 @@ certs/                    Certificat intermédiaire Sectigo (serveur Exchange)
 
 ## ⚠️ Limites connues
 
-- **E-PROJET** n'accepte la saisie que sur les **8 derniers jours** : au-delà, les jours sont ignorés et listés en
-  fin d'exécution.
+- **E-PROJET** n'accepte la saisie que sur les **8 derniers jours** : les tâches plus anciennes ne sont pas créées et
+  l'exécution échoue en les listant — corrige leur date ou décoche-les dans **Plan…**, puis relance.
 - **OrangeScrum** : pas de clôture « Terminée / 100 % » ni de type spécifique pour les réunions. Le projet est
   sélectionné par son nom affiché (un nom tronqué dans le menu peut ne pas être trouvé).
 - **Exchange Orange CI** : le serveur n'envoie pas son certificat intermédiaire ; il est fourni dans `certs/`
@@ -264,7 +288,7 @@ certs/                    Certificat intermédiaire Sectigo (serveur Exchange)
 
 | Symptôme | Piste |
 |---|---|
-| Une exécution a échoué | journal dans l'interface ou `logs/rpa_AAAA-MM-JJ.log` |
+| Une exécution a échoué | journal dans l'interface ou `logs/rpa_AAAA-MM-JJ.log` ; capture `logs/echec_…png` ; relancer reprend le plan en cours |
 | Erreur de l'IA (quota, modèle retiré…) | *Tester la connexion* à l'étape Analyse IA, ou changer de modèle |
 | Rien ne se passe à 18h | *Prochaine exécution* dans le tableau de bord ; exécution déjà faite aujourd'hui ? ; commandes « Vérifier » ci-dessus |
 | Demande d'accès au trousseau à chaque build (macOS) | normal : nouvelle signature de l'app → « Toujours autoriser » |

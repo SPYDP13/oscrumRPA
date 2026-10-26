@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from config import EPROJET_TYPE_TACHE_REUNION_ID
+from config import EPROJET_TYPE_TACHE_REUNION_ID, GITLAB_AUTHOR
 from dateformat import date_str as format_date_str
 
 
@@ -25,6 +25,34 @@ class LlmTaskRefiner:
         self.since = since
         self.until = until
         self.meetings = meetings or []
+        self._flag_overlaps()
+        self.kept_meetings = [m for m in self.meetings if m["include"]]
+
+    # ─────────────────────────────────────────────────────────────
+    def _flag_overlaps(self):
+        """Réunions qui se chevauchent le même jour : seule la plus longue est gardée par défaut. Les autres restent
+        dans le plan, décochées (« include »), pour que l'utilisateur puisse choisir dans l'aperçu"""
+        by_day = defaultdict(list)
+        for m in self.meetings:
+            m["include"] = True
+            by_day[m["date"].split(" ")[0]].append(m)
+
+        for day_meetings in by_day.values():
+            day_meetings.sort(key=lambda m: m["start"])
+            cluster, end = [], ""
+            for m in day_meetings + [None]:
+                if m and cluster and m["start"] < end:  # "HH:MM" : comparaison de chaînes = chronologique
+                    cluster.append(m)
+                    end = max(end, m["end"])
+                    continue
+                if len(cluster) > 1:
+                    keep = max(cluster, key=lambda c: c["hours"])
+                    for c in cluster:
+                        c["include"] = c is keep
+                        c["conflict"] = "chevauche : " + ", ".join(
+                            f"{o['title']} ({o['start']}-{o['end']})" for o in cluster if o is not c)
+                if m:
+                    cluster, end = [m], m["end"]
 
     # ─────────────────────────────────────────────────────────────
     def execute(self) -> list:
@@ -43,7 +71,7 @@ class LlmTaskRefiner:
         meeting_tasks = self._meeting_tasks(working_days)
         if self.commits:
             filler_tasks = self._analyse_with_llm(working_days)
-        elif meeting_tasks:
+        elif any(t["include"] for t in meeting_tasks):
             filler_tasks = self._analyse_with_llm(working_days, from_meetings=True)
         else:
             filler_tasks = []
@@ -56,7 +84,7 @@ class LlmTaskRefiner:
     def _meeting_hours_by_day(self) -> dict:
         """{"2026-10-14": 1.5, ...} — heures de réunion par jour"""
         hours = defaultdict(float)
-        for m in self.meetings:
+        for m in self.kept_meetings:
             hours[datetime.strptime(m["date"].split(" ")[0], "%Y-%m-%d").strftime("%Y-%m-%d")] += m["hours"]
         return hours
 
@@ -73,18 +101,21 @@ class LlmTaskRefiner:
                 "title": f"Reunion - {m['title']} ({dt:%d/%m})",
                 "dateStr": format_date_str(dt, "09:00 am"),
                 "date": f"{dt.year}-{dt.month}-{dt.day} 09:00 am",
-                "author": "SAWADOGO Yves Dieudonne",
+                "author": GITLAB_AUTHOR or "",
                 "hours": m["hours"],
                 "project_id": "outlook",
                 "type_tache_id": EPROJET_TYPE_TACHE_REUNION_ID,
                 "original_commits": [f"Outlook {m['start']}-{m['end']}"],
+                "include": m["include"],
+                **({"conflict": m["conflict"]} if m.get("conflict") else {}),
             })
         return result
 
     # ─────────────────────────────────────────────────────────────
     def _get_working_days(self) -> list:
         """Retourne tous les jours ouvrables (lundi→vendredi) entre since et until"""
-        since_dt = datetime.strptime(self.since, "%Y-%m-%dT%H:%M:%SZ").date()
+        # Point de reprise « J 23:59:59 » (fin d'une exécution réussie) : J est déjà saisi, on commence au lendemain
+        since_dt = (datetime.strptime(self.since, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=1)).date()
         until_dt = datetime.strptime(self.until, "%Y-%m-%dT%H:%M:%SZ").date()
 
         working_days = []
@@ -127,7 +158,7 @@ class LlmTaskRefiner:
 
         if from_meetings:
             source_json = json.dumps(
-                [{"title": m["title"], "date": m["date"], "hours": m["hours"]} for m in self.meetings],
+                [{"title": m["title"], "date": m["date"], "hours": m["hours"]} for m in self.kept_meetings],
                 ensure_ascii=False, indent=2)
             intro = ("Il n'y a aucun commit Git sur la période. À partir de ces réunions, crée le travail "
                      "réalisé autour d'elles pour compléter un plan de timesheet professionnel.")
@@ -275,7 +306,7 @@ Réponds UNIQUEMENT avec un tableau JSON valide. Sans markdown, sans explication
                 "title": task["title"],
                 "dateStr": date_str,
                 "date": date_simple,
-                "author": "SAWADOGO Yves Dieudonne",
+                "author": GITLAB_AUTHOR or "",
                 "hours": float(task.get("hours", 1.0)),
                 "project_id": task.get("project_id", "?"),
                 "original_commits": task.get("original_commits", [])
@@ -288,6 +319,7 @@ Réponds UNIQUEMENT avec un tableau JSON valide. Sans markdown, sans explication
 
     # ─────────────────────────────────────────────────────────────
     def _print_summary(self, tasks: list):
+        tasks = [t for t in tasks if t.get("include", True)]
         print(f"\n✅ {len(tasks)} tâches après analyse {self.NAME}\n")
 
         day_map = defaultdict(list)

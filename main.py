@@ -3,7 +3,10 @@ import argparse
 
 def run(since: str = None, until: str = None, dry_run: bool = False):
     """since / until : "AAAA-MM-JJ" (période imposée) ; dry_run : analyse sans saisie dans le timesheet"""
+    from config import check_config
     from taskExecutor.gitlab.GitlabOrangeScrumExecutor import GitlabOrangeScrumExecutor
+
+    check_config()
 
     executor = GitlabOrangeScrumExecutor(since=f"{since}T00:00:00Z" if since else None,
                                          until=f"{until}T23:59:59Z" if until else None)

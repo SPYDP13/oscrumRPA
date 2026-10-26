@@ -5,6 +5,9 @@
 __pycache__/
 *.pyc
 .sync_state.json
+.plan.json
 logs/
 build/
 dist/
+*.local.md
+.DS_Store

@@ -1,4 +1,3 @@
-# /Users/yves/Documents/personnel/brvm/OrangeScrumRpa/config.py
 
 import os
 from dotenv import load_dotenv
@@ -18,6 +17,23 @@ SECRET_KEYS = ("GITLAB_TOKEN", "EXCHANGE_PASSWORD", "EPROJET_PASSWORD", "OSCRUM_
 def get_secret(name: str):
     import secret_vault
     return secret_vault.load(SECRET_KEYS).get(name) or os.getenv(name)
+
+
+# Valeurs invalides relevées à l'import, signalées au lancement du RPA (check_config) : l'interface doit pouvoir
+# s'ouvrir pour les corriger
+CONFIG_ERRORS = []
+
+
+def _choice(name: str, default: str, allowed: tuple) -> str:
+    value = os.getenv(name, default).strip().lower()
+    if value not in allowed:
+        CONFIG_ERRORS.append(f"{name} invalide : '{value}' (attendu : {', '.join(allowed)})")
+    return value
+
+
+def check_config():
+    if CONFIG_ERRORS:
+        raise ValueError("❌ Configuration : " + " ; ".join(CONFIG_ERRORS))
 
 
 def parse_gitlab_projects(raw: str) -> list:
@@ -45,9 +61,7 @@ def legacy_gitlab_projects(project_ids: str, branches: str) -> str:
 APP_SUPPORT_DIR = STATE_DIR
 
 # Analyse IA des tâches : "claude" (CLI Claude Code), "gemini" ou "mistral"
-TASK_REFINER = os.getenv("TASK_REFINER", "claude").strip().lower()
-if TASK_REFINER not in ("claude", "gemini", "mistral"):
-    raise ValueError(f"TASK_REFINER invalide : '{TASK_REFINER}' (attendu : claude, gemini ou mistral)")
+TASK_REFINER = _choice("TASK_REFINER", "claude", ("claude", "gemini", "mistral"))
 
 GEMINI_API_KEY  = get_secret("GEMINI_API_KEY")
 GEMINI_MODEL    = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
@@ -58,9 +72,7 @@ CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
 CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL")  # ex: "sonnet", "opus" — None = modele par defaut du CLI
 
 # Plateforme de timesheet à remplir : "eprojet" ou "orangescrum"
-TIMESHEET_TARGET = os.getenv("TIMESHEET_TARGET", "eprojet").strip().lower()
-if TIMESHEET_TARGET not in ("eprojet", "orangescrum"):
-    raise ValueError(f"TIMESHEET_TARGET invalide : '{TIMESHEET_TARGET}' (attendu : eprojet ou orangescrum)")
+TIMESHEET_TARGET = _choice("TIMESHEET_TARGET", "eprojet", ("eprojet", "orangescrum"))
 
 # OrangeScrum
 OSCRUM_URL      = os.getenv("OSCRUM_URL", "https://orangescrum.synelia.tech").rstrip("/")
@@ -96,6 +108,4 @@ EXCHANGE_USERNAME = os.getenv("EXCHANGE_USERNAME")  # ex: DOMAINE\login — si v
 EXCHANGE_PASSWORD = get_secret("EXCHANGE_PASSWORD")
 
 # Source des tâches : "gitlab" (commits), "outlook" (réunions du calendrier) ou "both" (les deux)
-TASK_SOURCE = os.getenv("TASK_SOURCE", "gitlab").strip().lower()
-if TASK_SOURCE not in ("gitlab", "outlook", "both"):
-    raise ValueError(f"TASK_SOURCE invalide : '{TASK_SOURCE}' (attendu : gitlab, outlook ou both)")
+TASK_SOURCE = _choice("TASK_SOURCE", "gitlab", ("gitlab", "outlook", "both"))

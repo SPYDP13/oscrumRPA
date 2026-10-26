@@ -3,22 +3,25 @@
 Lancement : .venv/bin/python rpa_timesheet.py (ou l'application packagée)
 """
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QDate, QProcess, QProcessEnvironment, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QFont, QIcon, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QListView, QDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from dotenv import dotenv_values
 
 import shutil
 
 import browser_setup
+import plan_store
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
 from config import ENV_PATH, SECRET_KEYS, format_gitlab_projects, parse_gitlab_projects
 from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
@@ -720,27 +723,166 @@ class ResumeDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────
+class PlanDialog(QDialog):
+    """Plan en attente de saisie : cocher / décocher, corriger titres, dates et heures. « Exécuter » saisit ce plan
+    tel quel. Réunions qui se chevauchent surlignées : la plus longue est cochée par défaut."""
+    COLS = ("Saisir", "Date", "Heures", "Titre", "Source")
+    CONFLICT = QColor(245, 158, 11, 70)
+
+    def __init__(self, plan: dict, parent=None):
+        super().__init__(parent)
+        self.plan = plan
+        self.discarded = False
+        self.setWindowTitle("Plan de saisie")
+        self.resize(1100, 640)
+
+        tasks = plan["tasks"]
+        self.table = QTableWidget(len(tasks), len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(4, 280)
+
+        editable = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
+        for row, task in enumerate(tasks):
+            locked = plan_store.started(task)
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled | (Qt.ItemFlag(0) if locked else Qt.ItemFlag.ItemIsUserCheckable))
+            check.setCheckState(Qt.CheckState.Checked if task.get("include", True) else Qt.CheckState.Unchecked)
+            source = task.get("conflict") or ", ".join(task.get("original_commits") or [])
+            items = [check,
+                     QTableWidgetItem(f"{plan_store.day_of(task):%d/%m/%Y}"),
+                     QTableWidgetItem(f"{task['hours']:g}"),
+                     QTableWidgetItem(task["title"]),
+                     QTableWidgetItem(source)]
+            items[4].setToolTip(source)
+            for col, item in enumerate(items[1:], 1):
+                item.setFlags(editable if col < 4 and not locked else Qt.ItemFlag.ItemIsEnabled)
+            for col, item in enumerate(items):
+                if locked:
+                    item.setToolTip("Déjà créée ou saisie dans le timesheet : non modifiable")
+                elif task.get("conflict"):
+                    item.setBackground(self.CONFLICT)
+                self.table.setItem(row, col, item)
+        self.table.itemChanged.connect(self._update_totals)
+
+        conflicts = sum(1 for t in tasks if t.get("conflict"))
+        # point de reprise « J 23:59:59 » = à partir du lendemain
+        day = lambda s, shift: (datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=shift)).date()
+        period = f"{day(plan['since'], 1):%d/%m/%Y} → {day(plan['until'], 0):%d/%m/%Y}"
+        self.totals = _label("", "hint", wrap=True)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(12)
+        lay.addWidget(_label("Plan de saisie", "h2"))
+        lay.addWidget(_label(
+            f"Période {period}{' (rattrapage)' if plan['custom'] else ''} — "
+            f"{'validé' if plan.get('validated') else 'non validé'}. Corrige les titres, dates (JJ/MM/AAAA) et heures, "
+            "décoche ce qui ne doit pas être saisi. La prochaine exécution saisit exactement ce plan."
+            + (f" ⚠️ {conflicts} réunion(s) en conflit (surlignées) : la plus longue est cochée, choisis celle à garder."
+               if conflicts else ""), "subtitle", wrap=True))
+        lay.addWidget(self.table, 1)
+        lay.addWidget(self.totals)
+        buttons = QHBoxLayout()
+        discard, cancel, ok = _button("Abandonner le plan", "danger"), _button("Annuler"), _button("Valider", "primary")
+        discard.clicked.connect(self._discard)
+        cancel.clicked.connect(self.reject)
+        ok.clicked.connect(self._save)
+        buttons.addWidget(discard)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+        self._update_totals()
+
+    def _row(self, row: int) -> tuple:
+        """(cochée, date, heures, titre) ; lève ValueError si la ligne est invalide"""
+        cell = lambda col: self.table.item(row, col).text().strip()
+        try:
+            day = datetime.strptime(cell(1), "%d/%m/%Y").date()
+        except ValueError:
+            raise ValueError(f"ligne {row + 1} : date « {cell(1)} » invalide (JJ/MM/AAAA)") from None
+        try:
+            hours = float(cell(2).replace(",", "."))
+        except ValueError:
+            hours = 0
+        if hours <= 0:
+            raise ValueError(f"ligne {row + 1} : heures « {cell(2)} » invalides")
+        title = re.sub(r"\s+", " ", re.sub(r"['’]", " ", cell(3))).strip()  # pas d'apostrophe dans E-PROJET
+        if not title:
+            raise ValueError(f"ligne {row + 1} : titre vide")
+        return self.table.item(row, 0).checkState() == Qt.CheckState.Checked, day, hours, title
+
+    def _update_totals(self, *_):
+        by_day = {}
+        for row in range(self.table.rowCount()):
+            try:
+                checked, day, hours, _ = self._row(row)
+            except ValueError:
+                continue
+            if checked:
+                by_day[day] = by_day.get(day, 0) + hours
+        days = " · ".join(f"{DAYS_FR[d.weekday()]} {d:%d/%m} : {h:g} h" for d, h in sorted(by_day.items()))
+        self.totals.setText(f"Total {sum(by_day.values()):g} h — {days}" if by_day else "Aucune tâche cochée")
+
+    def _save(self):
+        try:
+            rows = [self._row(row) for row in range(self.table.rowCount())]
+        except ValueError as e:
+            QMessageBox.warning(self, "Plan", str(e))
+            return
+        for task, (checked, day, hours, title) in zip(self.plan["tasks"], rows):
+            if plan_store.started(task):
+                continue
+            task["include"] = checked
+            task["hours"] = hours
+            task["title"] = title
+            plan_store.set_day(task, day)
+        self.plan["validated"] = True
+        plan_store.save(self.plan)
+        self.accept()
+
+    def _discard(self):
+        warning = ("\n\nDes tâches de ce plan sont déjà créées dans le timesheet : elles seront recréées."
+                   if plan_store.has_progress(self.plan) else "")
+        if QMessageBox.question(self, "Plan", "Abandonner ce plan ? La prochaine exécution relancera l'analyse IA."
+                                + warning) != QMessageBox.StandardButton.Yes:
+            return
+        plan_store.clear()
+        self.discarded = True
+        self.accept()
+
+
+# ─────────────────────────────────────────────────────────────
 class BrowserDialog(QDialog):
-    """Premier lancement : téléchargement du navigateur Chromium utilisé par le RPA"""
+    """Téléchargement (premier lancement) ou réparation du navigateur Chromium utilisé par le RPA"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Installation du navigateur")
+        self.installed = browser_setup.is_installed()
+        self.setWindowTitle("Navigateur Chromium")
         self.setMinimumSize(560, 360)
         self.output = QPlainTextEdit()
         self.output.setObjectName("log")
         self.output.setReadOnly(True)
-        self.btn = _button("Télécharger", "primary")
+        self.btn = _button("Réinstaller" if self.installed else "Télécharger", "primary")
         self.btn.clicked.connect(self._start)
-        later = _button("Plus tard")
+        later = _button("Fermer" if self.installed else "Plus tard")
         later.clicked.connect(self.reject)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
-        lay.addWidget(_label("Premier lancement", "h2"))
-        lay.addWidget(_label("Le RPA pilote un navigateur Chromium pour saisir les tâches. Il n'est pas inclus "
-                             "dans l'application : il faut le télécharger une fois (≈ 150 Mo).", "subtitle", wrap=True))
+        lay.addWidget(_label("Navigateur Chromium" if self.installed else "Navigateur manquant", "h2"))
+        lay.addWidget(_label("Chromium est installé. Réinstalle-le uniquement si le RPA n'arrive plus à ouvrir le "
+                             "navigateur (≈ 150 Mo)." if self.installed else
+                             "Le RPA pilote un navigateur Chromium pour saisir les tâches. Il n'est pas inclus "
+                             "dans l'application (ou il a été supprimé) : il faut le télécharger (≈ 150 Mo).",
+                             "subtitle", wrap=True))
         lay.addWidget(self.output, 1)
         row = QHBoxLayout()
         row.addStretch()
@@ -752,7 +894,7 @@ class BrowserDialog(QDialog):
     def _start(self):
         self.btn.setEnabled(False)
         self.btn.setText("Téléchargement…")
-        command = entry_command("--install-browser")
+        command = entry_command("--reinstall-browser" if self.installed else "--install-browser")
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(lambda: self.output.appendPlainText(
@@ -806,6 +948,9 @@ class MainWindow(QMainWindow):
         header.addStretch()
         self.btn_config = _button("⚙  Configuration")
         self.btn_config.clicked.connect(self.open_setup)
+        self.btn_browser = _button("🌐  Navigateur")
+        self.btn_browser.clicked.connect(lambda: BrowserDialog(self).exec())
+        header.addWidget(self.btn_browser, alignment=Qt.AlignmentFlag.AlignTop)
         header.addWidget(self.btn_config, alignment=Qt.AlignmentFlag.AlignTop)
 
         # Cartes d'état
@@ -822,6 +967,7 @@ class MainWindow(QMainWindow):
         # Actions
         self.btn_run = _button("▶  Exécuter maintenant", "primary")
         self.btn_preview = _button("Aperçu sans saisie")
+        self.btn_plan = _button("📋  Plan…")
         self.btn_period = _button("Rattrapage…")
         self.btn_resume = _button("Point de reprise…")
         self.btn_stop = _button("■  Arrêter", "danger")
@@ -830,11 +976,12 @@ class MainWindow(QMainWindow):
         self.btn_preview.clicked.connect(lambda: self.start_run(["--dry-run"]))
         self.btn_period.clicked.connect(self.run_period)
         self.btn_resume.clicked.connect(self.edit_resume)
+        self.btn_plan.clicked.connect(self.open_plan)
         self.btn_stop.clicked.connect(self.stop_run)
         self.btn_schedule.clicked.connect(self.toggle_schedule)
         actions = QHBoxLayout()
         actions.setSpacing(10)
-        for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_stop):
+        for b in (self.btn_run, self.btn_preview, self.btn_plan, self.btn_period, self.btn_resume, self.btn_stop):
             actions.addWidget(b)
         actions.addStretch()
         actions.addWidget(self.btn_schedule)
@@ -899,9 +1046,17 @@ class MainWindow(QMainWindow):
                                "" if installed else "active la programmation pour 18h")
         self.btn_schedule.setText("Désactiver la programmation" if installed else "Programmer 17h55 / 18h")
 
+        plan = plan_store.load()
+        conflicts = plan and any(t.get("conflict") for t in plan["tasks"]) and not plan.get("validated")
+        self.btn_plan.setText(f"📋  Plan ({sum(1 for t in plan['tasks'] if t.get('include', True))})"
+                              f"{' ⚠️' if conflicts else ''}…" if plan else "📋  Plan…")
+        self.btn_plan.setToolTip("Plan en attente : saisi tel quel à la prochaine exécution" if plan else
+                                 "Aucun plan en attente : « Aperçu sans saisie » en prépare un")
+
         running = self.process is not None
         for b in (self.btn_run, self.btn_preview, self.btn_period, self.btn_resume, self.btn_config):
             b.setEnabled(not running)
+        self.btn_plan.setEnabled(bool(plan) and not running)
         self.btn_stop.setVisible(running)
         self.lbl_status.setText("⏳ Exécution en cours…" if running else "")
 
@@ -933,9 +1088,19 @@ class MainWindow(QMainWindow):
             self._append(f"\n📌 Point de reprise corrigé : prochaine exécution à partir du {dialog.value():%d/%m/%Y}\n")
             self.refresh()
 
+    def open_plan(self):
+        plan = plan_store.load()
+        if not plan:
+            return
+        dialog = PlanDialog(plan, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._append("\n🗑 Plan abandonné\n" if dialog.discarded else "\n📋 Plan validé : saisi tel quel à la prochaine exécution\n")
+        self.refresh()
+
     def start_run(self, args: list):
         if self.process:
             return
+        self.run_args = args
         os.makedirs(LOGS_DIR, exist_ok=True)
         self.log_file = open(os.path.join(LOGS_DIR, f"rpa_{date.today().isoformat()}.log"), "a", encoding="utf-8")
         self._append(f"\n===== {datetime.now():%d/%m/%Y %H:%M:%S} — main.py {' '.join(args)} =====\n")
@@ -983,6 +1148,8 @@ class MainWindow(QMainWindow):
         self.refresh()
         if not ok and not stopped:
             QMessageBox.warning(self, "RPA Timesheet", "L'exécution a échoué — voir le journal.")
+        elif ok and "--dry-run" in self.run_args:
+            self.open_plan()  # l'aperçu est un plan à relire / corriger avant la saisie
 
     def _append(self, text: str):
         self.log.moveCursor(QTextCursor.MoveOperation.End)

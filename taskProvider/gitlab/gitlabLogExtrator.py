@@ -1,5 +1,5 @@
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from config import GITLAB_TOKEN, GITLAB_URL, GITLAB_AUTHOR, GITLAB_PROJECTS
 from taskProvider.gitlab.syncState import get_last_since
 from dateformat import date_simple as format_date_simple, date_str as format_date_str
@@ -13,15 +13,11 @@ headers = {
     "PRIVATE-TOKEN": GITLAB_TOKEN
 }
 
-SYNC_WINDOW_DAYS = 13  # ← nombre de jours synchronisés à chaque lancement
-
-_since = get_last_since()
-_until = datetime.strptime(_since, "%Y-%m-%dT%H:%M:%SZ") + timedelta(days=SYNC_WINDOW_DAYS)
+REQUEST_TIMEOUT = 30  # secondes, par requête GitLab
 
 params = {
     "author": GITLAB_AUTHOR,
-    "since": _since,  # ← reprend automatiquement à la date de la dernière synchro
-    # "until": _until.strftime("%Y-%m-%dT23:59:59Z"),  # ← since + 10 jours
+    "since": get_last_since(),  # ← reprend automatiquement à la date de la dernière synchro
     "until": datetime.now().strftime("%Y-%m-%dT23:59:59Z"),
     "per_page": 200,
 }
@@ -87,12 +83,14 @@ class GitlabLogExtractor:
                 f"{self.gitlab_url}/projects/{project_id}/repository/commits",
                 headers=self.headers,
                 params=request_params,
-                verify=True
+                verify=True,
+                timeout=REQUEST_TIMEOUT
             )
 
+            # Commits manquants = timesheet incomplète : on arrête tout (le point de reprise n'avance pas)
             if response.status_code != 200:
-                print(f"Erreur projet {project_id} — {response.status_code} : {response.text}")
-                break
+                raise RuntimeError(f"❌ GitLab, projet {project_id} branche {branch} — "
+                                   f"{response.status_code} : {response.text[:300]}")
 
             commits = response.json()
             if not commits:
@@ -130,7 +128,8 @@ class GitlabLogExtractor:
     def debug_gitlab(self):
         for project_id in self.project_ids:
             print(f"\n=== INFOS DU PROJET {project_id} ===")
-            r = requests.get(f"{self.gitlab_url}/projects/{project_id}", headers=self.headers, verify=True)
+            r = requests.get(f"{self.gitlab_url}/projects/{project_id}", headers=self.headers, verify=True,
+                             timeout=REQUEST_TIMEOUT)
             print(f"Status: {r.status_code}")
             if r.status_code == 200:
                 project = r.json()
