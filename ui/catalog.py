@@ -84,9 +84,10 @@ def fetch_eprojet(values: dict) -> dict:
         "EPROJET_PROJECT_ID": projects,
         "EPROJET_TYPE_TACHE_ID": types,
         "EPROJET_TYPE_TACHE_REUNION_ID": types,
-        "EPROJET_RESP_EXTERNE": resp_by_project,
+        "EPROJET_RESP_EXTERNE": sorted({o[0]: o for people in resp_by_project.values() for o in people}.values(),
+                                       key=lambda o: o[0].lower()),
         "_summary": f"{len(projects)} projet(s), {len(types)} type(s) de tâche, "
-                    f"{sum(len(v) for v in resp_by_project.values())} responsable(s) externe(s)",
+                    f"{len({o[0] for people in resp_by_project.values() for o in people})} responsable(s) externe(s)",
     }
 
 

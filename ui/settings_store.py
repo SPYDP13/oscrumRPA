@@ -5,7 +5,7 @@ import secret_vault
 from dotenv import dotenv_values, set_key, unset_key
 
 from config import ENV_PATH, SECRET_KEYS, legacy_gitlab_projects, parse_gitlab_projects
-from taskRefinings.projectMapping import format_mapping, rules_from_projects
+from taskRefinings.projectMapping import format_mapping, parse_mapping, rules_from_projects
 
 # Valeurs proposées quand rien n'est encore configuré (aucune donnée propre à un utilisateur ou un projet)
 DEFAULTS = {
@@ -75,10 +75,27 @@ def save(values: dict):
     set_key(ENV_PATH, "UI_CONFIGURED", "1", quote_mode="never")
 
 
+def main_project(mapping: str) -> str:
+    """Projet principal (invisible pour l'utilisateur) : celui qui revient le plus dans les correspondances. Il reçoit
+    les réunions, les activités génériques et les dépôts sans règle. Sans correspondance : le projet déjà enregistré,
+    sinon l'unique projet E-PROJET connu."""
+    targets = [t for _, t in parse_mapping(mapping)]
+    if targets:
+        return max(dict.fromkeys(targets), key=targets.count)
+    env = dotenv_values(ENV_PATH) if os.path.exists(ENV_PATH) else {}
+    if env.get("EPROJET_PROJECT_ID"):
+        return env["EPROJET_PROJECT_ID"]
+    from ui.catalog import cached_eprojet
+    projects = cached_eprojet().get("projects", [])
+    return str(projects[0][0]) if len(projects) == 1 else ""
+
+
 def save_keys(values: dict):
     """Enregistre seulement ces réglages (hors secrets), sans toucher au reste du .env"""
     if not os.path.exists(ENV_PATH):
         open(ENV_PATH, "w").close()
+    if "PROJECT_MAPPING" in values and "EPROJET_PROJECT_ID" not in values:
+        values = {**values, "EPROJET_PROJECT_ID": main_project(values["PROJECT_MAPPING"])}
     for key, value in values.items():
         if key in FIELDS and key not in SECRET_KEYS:
             set_key(ENV_PATH, key, (value or "").strip(), quote_mode="never")

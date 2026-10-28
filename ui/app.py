@@ -23,7 +23,7 @@ import shutil
 import browser_setup
 import plan_store
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
-from config import ENV_PATH, SECRET_KEYS, format_gitlab_projects, parse_gitlab_projects
+from config import ENV_PATH, SECRET_KEYS
 from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
 from taskRefinings.projectMapping import format_mapping, group_of, parse_mapping, resolve
 from ui import catalog, checks, scheduler, settings_store
@@ -113,74 +113,6 @@ class Field(QWidget):
         return self.edit.text().strip()
 
 
-class ProjectBranches:
-    """Spécification d'une liste de couples projet / branche (bouton « + » pour en ajouter)"""
-
-    def __init__(self, key: str, label: str, hint: str = ""):
-        self.key, self.label, self.hint = key, label, hint
-
-
-class ProjectBranchesField(QWidget):
-    """Une ligne par couple « id du projet · branche » ; enregistré sous la forme 406:preprod,404:develop"""
-
-    def __init__(self, spec: ProjectBranches, value: str):
-        super().__init__()
-        self.rows = []
-        self.rows_layout = QVBoxLayout()
-        self.rows_layout.setSpacing(8)
-        add = _button("+  Ajouter un projet")
-        add.clicked.connect(lambda: self._add_row().setFocus())
-
-        header = QHBoxLayout()
-        header.addWidget(_label("Id du projet", "hint"), 1)
-        header.addWidget(_label("Branche", "hint"), 1)
-        header.addSpacing(44)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        lay.addWidget(_label(spec.label, "fieldLabel"))
-        lay.addLayout(header)
-        lay.addLayout(self.rows_layout)
-        lay.addWidget(add, alignment=Qt.AlignmentFlag.AlignLeft)
-        if spec.hint:
-            lay.addWidget(_label(spec.hint, "hint", wrap=True))
-
-        for pid, branch in parse_gitlab_projects(value) or [("", "")]:
-            self._add_row(pid, branch)
-
-    def _add_row(self, pid: str = "", branch: str = "") -> QLineEdit:
-        row = QWidget()
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(8)
-        pid_edit, branch_edit = QLineEdit(pid), QLineEdit(branch)
-        pid_edit.setPlaceholderText("ex. 406")
-        branch_edit.setPlaceholderText("toutes les branches")
-        remove = _button("✕")
-        remove.setFixedWidth(36)
-        remove.setToolTip("Retirer ce projet")
-        remove.clicked.connect(lambda: self._remove_row(row))
-        rl.addWidget(pid_edit, 1)
-        rl.addWidget(branch_edit, 1)
-        rl.addWidget(remove)
-        self.rows.append((row, pid_edit, branch_edit))
-        self.rows_layout.addWidget(row)
-        return pid_edit
-
-    def _remove_row(self, row: QWidget):
-        self.rows = [r for r in self.rows if r[0] is not row]
-        row.deleteLater()
-        if not self.rows:
-            self._add_row()
-
-    def pairs(self) -> list:
-        """Branche vide = toutes les branches du projet"""
-        return [(p.text().strip(), b.text().strip()) for _, p, b in self.rows if p.text().strip()]
-
-    def value(self) -> str:
-        return format_gitlab_projects(self.pairs())
-
-
 class Combo:
     """Spécification d'un champ liste déroulante, modifiable à la main (id saisi directement)"""
 
@@ -264,9 +196,6 @@ class FormSection(QWidget):
         for spec in fields:
             if isinstance(spec, Combo):
                 field = ComboField(spec, values.get(spec.key, ""))
-                key = spec.key
-            elif isinstance(spec, ProjectBranches):
-                field = ProjectBranchesField(spec, values.get(spec.key, ""))
                 key = spec.key
             else:
                 key, label, placeholder, *hint = spec
@@ -521,7 +450,7 @@ class MappingEditor(QWidget):
         lines = [f"{len(rules)} règle(s) : " + ("  ·  ".join(f"{p} → {names.get(t, t)}" for p, t in rules) or "aucune")]
         unmapped = [r["path"] for r in self.repos if resolve(rules, r["id"], r["path"]) is None]
         if unmapped:
-            lines.append(f"⚠️ {len(unmapped)} dépôt(s) sans projet → projet par défaut : "
+            lines.append(f"⚠️ {len(unmapped)} dépôt(s) sans projet → rangé(s) dans ton projet principal : "
                          + ", ".join(p.rsplit('/', 1)[-1] for p in unmapped[:8]) + (" …" if len(unmapped) > 8 else ""))
         resp = (self.eprojet_values() or {}).get("EPROJET_RESP_EXTERNE", "")
         resp_lists = catalog.cached_eprojet().get("resp", {})
@@ -618,7 +547,7 @@ class MappingDialog(QDialog):
 
 MAPPING_HELP = ("Chaque dépôt GitLab est saisi dans le projet E-PROJET choisi ici. Un projet sur un groupe couvre tous "
                 "ses dépôts (sous-groupes compris) ; un dépôt peut avoir son propre projet. Un dépôt sans projet va "
-                "dans le projet par défaut (étape Timesheet) et est signalé dans le plan.")
+                "dans ton projet principal (le plus utilisé ci-dessus) et est signalé dans le plan, où tu peux le changer.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -676,12 +605,8 @@ class SetupDialog(QDialog):
         self.gitlab_form = FormSection([
             ("GITLAB_URL", "URL de l'API GitLab", "https://gitlab.exemple.com/api/v4"),
             ("GITLAB_AUTHOR", "Auteur des commits", "Nom tel qu'affiché dans GitLab"),
-            ProjectBranches("GITLAB_PROJECTS", "Liste blanche (facultatif)",
-                            "Vide = détection automatique (recommandé). Sinon, seuls ces projets sont lus : id du "
-                            "projet, et une branche si besoin (vide = toutes les branches)."),
             ("GITLAB_TOKEN", "Token d'accès privé", "glpat-…", "GitLab → Préférences → Access Tokens, scope read_api."),
-        ], v, check=lambda f: checks.check_gitlab(f["GITLAB_URL"], f["GITLAB_TOKEN"],
-                                                  parse_gitlab_projects(f["GITLAB_PROJECTS"])))
+        ], v, check=lambda f: checks.check_gitlab(f["GITLAB_URL"], f["GITLAB_TOKEN"]))
         gitlab.content.addWidget(self.gitlab_form)
         gitlab.finish()
         self.gitlab_page = gitlab
@@ -706,17 +631,14 @@ class SetupDialog(QDialog):
                 ("EPROJET_URL", "URL", "https://e-projet.synelia.tech/EProjet-1"),
                 ("EPROJET_USERNAME", "Login", ""),
                 ("EPROJET_PASSWORD", "Mot de passe", ""),
-                Combo("EPROJET_PROJECT_ID", "Projet par défaut",
-                      [(v["EPROJET_PROJECT_ID"], v["EPROJET_PROJECT_ID"])] if v["EPROJET_PROJECT_ID"] else [],
-                      "Reçoit les réunions, les activités génériques et les dépôts sans correspondance. "
-                      "« Charger les listes » affiche les projets de ton compte."),
                 Combo("EPROJET_RESP_EXTERNE", "Responsable externe",
                       [(v["EPROJET_RESP_EXTERNE"], v["EPROJET_RESP_EXTERNE"])] if v["EPROJET_RESP_EXTERNE"] else [],
-                      "Liste des responsables du projet choisi (après « Charger les listes »)."),
+                      "« Charger les listes » affiche les responsables de tes projets. Il doit être rattaché aux "
+                      "projets choisis à l'étape Correspondances."),
                 Combo("EPROJET_TYPE_TACHE_ID", "Type des tâches issues des commits", catalog.EPROJET_TYPES),
                 Combo("EPROJET_TYPE_TACHE_REUNION_ID", "Type des réunions et du travail autour", catalog.EPROJET_TYPES),
             ], v, check=lambda f: checks.check_eprojet(f["EPROJET_URL"], f["EPROJET_USERNAME"], f["EPROJET_PASSWORD"]),
-                loader=catalog.fetch_eprojet, depends={"EPROJET_RESP_EXTERNE": "EPROJET_PROJECT_ID"})),
+                loader=catalog.fetch_eprojet)),
             "orangescrum": ("OrangeScrum\norangescrum.synelia.tech", FormSection([
                 ("OSCRUM_URL", "URL", "https://orangescrum.synelia.tech"),
                 ("OSCRUM_USERNAME", "Email", "prenom.nom@exemple.com"),
@@ -867,6 +789,7 @@ class SetupDialog(QDialog):
                      self.gitlab_form, self.outlook_form):
             values.update(form.values())
         values["PROJECT_MAPPING"] = self.mapping_editor.value()
+        values["EPROJET_PROJECT_ID"] = settings_store.main_project(values["PROJECT_MAPPING"])
         try:
             settings_store.save(values)
             scheduler.install() if self.cb_schedule.isChecked() else scheduler.uninstall()
@@ -1044,7 +967,7 @@ class PlanDialog(QDialog):
             "décoche ce qui ne doit pas être saisi. La prochaine exécution saisit exactement ce plan."
             + (f" ⚠️ {conflicts} réunion(s) en conflit (surlignées) : la plus longue est cochée, choisis celle à garder."
                if conflicts else "")
-            + (f" 🔵 {unmapped} tâche(s) d'un dépôt sans correspondance (en bleu) : rangées dans le projet par défaut, "
+            + (f" 🔵 {unmapped} tâche(s) d'un dépôt sans correspondance (en bleu) : rangées dans ton projet principal, "
                "vérifie le projet." if unmapped else ""), "subtitle", wrap=True))
         lay.addWidget(self.table, 1)
         lay.addWidget(self.totals)
@@ -1299,8 +1222,7 @@ class MainWindow(QMainWindow):
         target = v["TIMESHEET_TARGET"]
         rules = len(parse_mapping(v["PROJECT_MAPPING"]))
         self.card_timesheet.set(TIMESHEET_LABELS.get(target, target),
-                                f"{rules} correspondance(s), défaut {catalog.project_names().get(v['EPROJET_PROJECT_ID'], v['EPROJET_PROJECT_ID'])}"
-                                if target == "eprojet" else v["OSCRUM_PROJECT"])
+                                f"{rules} correspondance(s)" if target == "eprojet" else v["OSCRUM_PROJECT"])
 
         last = get_last_run()
         resume = f"reprise au {_resume_day():%d/%m/%Y}"

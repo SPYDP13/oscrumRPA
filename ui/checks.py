@@ -4,29 +4,16 @@ from urllib.parse import quote
 import requests
 
 
-def check_gitlab(url: str, token: str, projects: list) -> str:
-    """projects : liste blanche facultative, couples (id du projet, branche) — branche vide = toutes"""
+def check_gitlab(url: str, token: str) -> str:
     headers = {"PRIVATE-TOKEN": token}
     r = requests.get(f"{url}/user", headers=headers, timeout=15)
     if r.status_code != 200:
         raise RuntimeError(f"Token refusé ({r.status_code})")
-    lines = [f"Connecté en tant que {r.json().get('name')}"]
     ev = requests.get(f"{url}/events", headers=headers, params={"action": "pushed", "per_page": 1}, timeout=15)
-    lines.append("Détection des dépôts (événements) ✓" if ev.ok else
-                 f"Détection des dépôts impossible ({ev.status_code}) : vérifie le scope read_api du token")
-    for pid, branch in projects:
-        p = requests.get(f"{url}/projects/{quote(pid, safe='')}", headers=headers, timeout=15)
-        if not p.ok:
-            lines.append(f"  {pid} : introuvable ({p.status_code})")
-            continue
-        if not branch:
-            lines.append(f"  {pid} : {p.json().get('name_with_namespace')} — toutes les branches ✓")
-            continue
-        b = requests.get(f"{url}/projects/{quote(pid, safe='')}/repository/branches/{quote(branch, safe='')}",
-                         headers=headers, timeout=15)
-        lines.append(f"  {pid} : {p.json().get('name_with_namespace')} — branche {branch} "
-                     + ("✓" if b.ok else f"introuvable ({b.status_code})"))
-    return "\n".join(lines)
+    if not ev.ok:
+        raise RuntimeError(f"Connecté en tant que {r.json().get('name')}, mais la détection des dépôts est impossible "
+                           f"({ev.status_code}) : vérifie le scope read_api du token")
+    return f"Connecté en tant que {r.json().get('name')} — détection des dépôts disponible"
 
 
 def check_exchange(server: str, email: str, username: str, password: str) -> str:

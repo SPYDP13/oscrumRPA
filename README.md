@@ -20,17 +20,17 @@ Application de bureau (PySide6) pour **macOS** et **Windows**, avec exécution p
 
 1. **Extraction** depuis le dernier point de reprise jusqu'à aujourd'hui :
    - **GitLab** : commits de l'auteur sur **tous les dépôts où il a poussé** (détection par les événements GitLab,
-     toutes branches), dédoublonnés par SHA, commits de merge ignorés. Liste blanche facultative (`GITLAB_PROJECTS`)
+     toutes branches), dédoublonnés par SHA, commits de merge ignorés
    - **Correspondances** : chaque dépôt est rattaché à un projet E-PROJET (règle par groupe `miniapp/*` ou par
-     dépôt) ; un dépôt sans règle va dans le **projet par défaut** et est signalé dans le plan
+     dépôt) ; un dépôt sans règle va dans ton **projet principal** (le plus utilisé dans tes correspondances, déduit automatiquement) et est signalé dans le plan
    - **Outlook** : réunions du calendrier Exchange (refusées, annulées, privées, journée entière et week-end ignorées).
      Réunions qui se **chevauchent** : seule la plus longue est gardée par défaut ; les autres restent dans le plan,
      décochées et surlignées, pour que tu choisisses dans l'aperçu
 2. **Heures (calculées, sans IA)** — `taskRefinings/dayPlanner.py`, **8 h pile par jour ouvré** :
-   - les **réunions** gardent leur **durée réelle** (type de tâche « Projet », projet par défaut)
+   - les **réunions** gardent leur **durée réelle** (type de tâche « Projet », projet principal)
    - le reste est réparti entre projets au prorata de l'**activité réelle du jour** (durée des sessions de commits)
    - jour sans commit : **préparation / suivi** des réunions du jour, puis **suite du travail** d'un jour voisin
-     (mêmes projets), sinon **activités génériques** sur le projet par défaut (`GENERIC_TASKS`)
+     (mêmes projets), sinon **activités génériques** sur le projet principal (`GENERIC_TASKS`)
 3. **Libellés (IA)** : le modèle reformule les commits de chaque bloc en 1 à 3 tâches, en français, **sans inventer**
    de travail absent des commits. Si l'IA échoue, un libellé de secours est construit à partir des commits : l'IA
    ne bloque plus l'exécution
@@ -75,9 +75,9 @@ modèles. Vérifie que c'est compatible avec les règles du client / de l'entrep
    |---|---|
    | Sources | GitLab, Outlook ou les deux |
    | Analyse IA | Claude (CLI Claude Code, sans clé), Gemini (clé API) ou Mistral (clé API + agent) |
-   | GitLab | URL de l'API, auteur, token ; liste blanche de projets facultative (vide = détection automatique) |
+   | GitLab | URL de l'API, auteur, token |
    | Outlook | serveur Exchange, adresse mail, login (facultatif), mot de passe |
-   | Timesheet | E-PROJET ou OrangeScrum : identifiants, projet par défaut, types de tâche, responsable / personne assignée |
+   | Timesheet | E-PROJET ou OrangeScrum : identifiants, types de tâche, responsable / personne assignée |
    | Correspondances | dépôts détectés (90 derniers jours), groupés par namespace : un projet E-PROJET par groupe, et si besoin par dépôt |
    | Programmation | notification 17h55 + exécution 18h, lancement immédiat |
 
@@ -85,9 +85,8 @@ modèles. Vérifie que c'est compatible avec les règles du client / de l'entrep
    personne assignée, types de tâche, agent Mistral) : seules les adresses des serveurs et les réglages techniques
    le sont.
 
-   **GitLab** : l'auteur et le token sont obligatoires. Les dépôts sont détectés automatiquement ; la liste blanche
-   (id du projet, branche facultative) ne sert qu'à restreindre. *Tester la connexion* vérifie le token, l'accès aux
-   événements et les projets de la liste blanche.
+   **GitLab** : l'auteur et le token sont obligatoires. Les dépôts sont détectés automatiquement (là où tu as
+   poussé). *Tester la connexion* vérifie le token et l'accès aux événements.
 
    **Correspondances** (aussi accessible depuis le tableau de bord, bouton **🔗 Correspondances**) : *Détecter mes
    dépôts* liste les dépôts où tu as poussé ces 90 derniers jours ; choisis un projet par groupe (`groupe/*`,
@@ -139,11 +138,10 @@ Tout se règle depuis l'assistant. Répartition :
 | `TASK_REFINER` | `claude`, `gemini` ou `mistral` | `claude` |
 | `TIMESHEET_TARGET` | `eprojet` ou `orangescrum` | `eprojet` |
 | `GITLAB_URL`, `GITLAB_AUTHOR` | API GitLab, auteur des commits | |
-| `GITLAB_PROJECTS` | facultatif : liste blanche `id[:branche]` (ex. `406:preprod,404`) ; vide = détection automatique, branche vide = toutes | |
 | `PROJECT_MAPPING` | correspondances dépôt → projet E-PROJET, `motif=id` séparés par `;` (ex. `miniapp/*=12;orange/ompi=34;406=34`) ; priorité id > chemin exact > motif le plus long | |
 | `GENERIC_TASKS` | activités des jours sans commit ni réunion, séparées par `;` | revue de code, support… |
 | `EXCHANGE_SERVER`, `EXCHANGE_EMAIL`, `EXCHANGE_USERNAME` | calendrier Outlook (login vide = adresse mail) | |
-| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET ; `EPROJET_PROJECT_ID` = **projet par défaut** (réunions, activités génériques, dépôts sans correspondance) | |
+| `EPROJET_URL`, `EPROJET_USERNAME`, `EPROJET_PROJECT_ID` | E-PROJET ; `EPROJET_PROJECT_ID` = **projet principal**, déduit des correspondances (réunions, activités génériques, dépôts sans règle), pas de champ dans l'interface | |
 | `EPROJET_RESP_EXTERNE` | responsable externe (nom affiché) | |
 | `EPROJET_TYPE_TACHE_ID` / `EPROJET_TYPE_TACHE_REUNION_ID` | type des tâches de commits / des réunions (ex. `-3` Développement / `-4` Projet) | |
 | `OSCRUM_URL`, `OSCRUM_USERNAME`, `OSCRUM_PROJECT` | OrangeScrum (nom exact du projet) | |
