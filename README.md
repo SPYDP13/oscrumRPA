@@ -49,14 +49,16 @@ le point de reprise n'avance pas et le plan est conservé : la relance reprend l
 
 ### Plan de saisie
 - **Aperçu sans saisie** prépare le plan puis l'ouvre (**📋 Plan…**) : cocher / décocher, corriger titres, dates et
-  heures, choisir parmi les réunions en conflit, puis **Valider**. Les apostrophes sont retirées des titres.
+  heures, choisir parmi les réunions en conflit, puis **Valider et saisir** (saisie immédiate) ou **Enregistrer**
+  (gardé pour plus tard). Les apostrophes sont retirées des titres.
 - **Exécuter maintenant** et **Rattrapage…** demandent un contexte facultatif, prévisualisent le plan puis l'ouvrent
-  en récapitulatif : rien n'est saisi avant **Valider et saisir** (**Annuler** garde le plan sans rien saisir). Le
+  en récapitulatif : rien n'est saisi avant **Valider et saisir** (**Annuler** / **Enregistrer** ne saisissent rien). Le
   plan en attente est repris sans rappeler l'IA. L'exécution programmée de 18h, elle, génère et saisit directement
   (réunions en conflit : la plus longue). En terminal, `--run` demande aussi confirmation avant la saisie.
 - **Contexte** (facultatif), ex. « lundi mardi je venais vers 10h et finissais vers 21h » : les horaires sont lus
-  sans IA (`taskRefinings/userContext.py`) et remplacent les 8 h de ces jours (10h → 21h = 11 h, sans déduire de
-  pause) ; jours reconnus : lundi…vendredi, hier, avant-hier, aujourd'hui, 12/11, « ces 2 derniers jours », « toute
+  sans IA (`taskRefinings/userContext.py`), chaque horaire étant rattaché aux jours cités juste avant lui, et
+  remplacent les 8 h de ces jours (10h → 21h = 11 h, sans déduire de
+  pause) ; jours reconnus : lundi…vendredi, hier, avant-hier, aujourd'hui (ou today), 12/11, « ces 2 derniers jours », « toute
   la semaine » ; durées : « j'ai fait 9h30 », « 10 heures de travail ». Le texte aide aussi l'IA à rédiger les
   libellés. Les horaires retenus sont affichés dans le plan.
 - Un aperçu brut (non validé, rien de saisi) d'un jour précédent est régénéré pour inclure les derniers commits ;

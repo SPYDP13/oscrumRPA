@@ -1,9 +1,12 @@
 """Contexte libre saisi par l'utilisateur au lancement (facultatif), ex. :
-« lundi mardi je venais vers 10h et finissais vers 21h ».
+« lundi et mardi je venais vers 9h30 et rentrais vers 21h30, jeudi 9h a 18h et aujourd'hui 11h a 15h ».
 
 Les horaires déclarés sont lus SANS IA (expressions simples, en français) : ils fixent les heures du jour à la place
 des 8 h par défaut (10h → 21h = 11 h, sans déduire de pause : l'utilisateur déclare son temps de présence). Le texte
 complet est aussi transmis à l'IA, mais uniquement pour la rédaction des libellés.
+
+Lecture : chaque heure (ou durée) est rattachée aux jours cités juste avant elle ; des jours cités à la suite
+(« lundi et mardi ») forment un même groupe ; des heures citées avant tout jour vont au premier groupe qui suit.
 
 Fonctions pures (testables seules) : aucune lecture de configuration ni de réseau.
 """
@@ -26,7 +29,11 @@ _DURATION = re.compile(
     r"|(\d{1,2}(?:[.,]\d+)?)\s*h(?:eures?)?\s*(\d{2})?\s*(?:de travail|de boulot|de presence|par jour)")
 _DATE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 _LAST_N = re.compile(r"\b(?:ces|les|mes)\s+(\d+|" + "|".join(NUMBERS) + r")\s+derniers?\s+jours?\b")
-_CLAUSE = re.compile(r"[.;\n!?]+")
+_WEEKDAY = re.compile(r"\b(" + "|".join(WEEKDAYS) + r")s?\b")
+_BEFORE_YESTERDAY = re.compile(r"\bavant[- ]?hier\b")
+_YESTERDAY = re.compile(r"(?<!avant-)(?<!avant )(?<!avant)\bhier\b")
+_TODAY = re.compile(r"\b(?:aujourd ?'? ?hui|auj|today|ce jour)\b")
+_ALL = re.compile(r"\b(?:toute la semaine|tous les jours|chaque jour)\b")
 
 
 def _norm(text: str) -> str:
@@ -36,45 +43,28 @@ def _norm(text: str) -> str:
     return text
 
 
-def _days_in(clause: str, days: list, today: date) -> list:
-    """Jours ouvrés de la période cités dans la proposition (dans l'ordre de la période)"""
-    found = set()
-    for name, wd in WEEKDAYS.items():
-        if re.search(rf"\b{name}s?\b", clause):
-            same = [d for d in days if date.fromisoformat(d).weekday() == wd]
-            if same:
-                found.add(same[-1])   # le plus récent de la période
-    for m in _DATE.finditer(clause):
+def _day_refs(text: str, days: list, today: date) -> list:
+    """Mentions de jours : [(position, [jours de la période])] — liste vide si le jour cité est hors période"""
+    refs = []
+    for m in _WEEKDAY.finditer(text):
+        same = [d for d in days if date.fromisoformat(d).weekday() == WEEKDAYS[m.group(1)]]
+        refs.append((m.start(), same[-1:]))   # le plus récent de la période
+    for m in _DATE.finditer(text):
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         year = (int(y) + 2000 if len(y) == 2 else int(y)) if y else today.year
         try:
-            found.add(date(year, mo, d).isoformat())
+            refs.append((m.start(), [date(year, mo, d).isoformat()]))
         except ValueError:
             pass
-    if re.search(r"\bavant[- ]hier\b", clause):
-        found.add((today - timedelta(days=2)).isoformat())
-    if re.search(r"(?<!avant-)(?<!avant )\bhier\b", clause):
-        found.add((today - timedelta(days=1)).isoformat())
-    if "aujourd'hui" in clause:
-        found.add(today.isoformat())
-    m = _LAST_N.search(clause)
-    if m:
+    for regex, delta in ((_BEFORE_YESTERDAY, 2), (_YESTERDAY, 1), (_TODAY, 0)):
+        for m in regex.finditer(text):
+            refs.append((m.start(), [(today - timedelta(days=delta)).isoformat()]))
+    for m in _LAST_N.finditer(text):
         n = int(m.group(1)) if m.group(1).isdigit() else NUMBERS[m.group(1)]
-        if n > 0:
-            found.update([d for d in days if d <= today.isoformat()][-n:])
-    if re.search(r"\b(toute la semaine|tous les jours|chaque jour)\b", clause):
-        found.update(days)
-    return [d for d in days if d in found]
-
-
-def _times_in(clause: str) -> list:
-    """Heures « 10h », « 10h30 », « 10:30 », « 21 heures » → ["10:00", "10:30", …]"""
-    result = []
-    for m in _TIME.finditer(clause):
-        h, mi = int(m.group(1)), int(m.group(2) or 0)
-        if h <= 23 and mi <= 59:
-            result.append(f"{h:02d}:{mi:02d}")
-    return result
+        refs.append((m.start(), [d for d in days if d <= today.isoformat()][-n:] if n > 0 else []))
+    for m in _ALL.finditer(text):
+        refs.append((m.start(), list(days)))
+    return [(pos, [d for d in found if d in days]) for pos, found in refs]
 
 
 def _span(start: str, end: str) -> float:
@@ -88,45 +78,76 @@ def describe(entry: dict) -> str:
     return f"{span}({entry['hours']:g} h)"
 
 
+def _entry(group: dict):
+    """Horaires d'un groupe de jours : durée déclarée, sinon première et dernière heure citées"""
+    if group["duration"] is not None:
+        return {"start": None, "end": None, "hours": group["duration"]}
+    times = group["times"]
+    if not times:
+        return None
+    if len(times) >= 2:
+        start, end = times[0], times[-1]
+    elif times[0] >= "12:00":
+        start, end = DEFAULT_START, times[0]
+    else:
+        start, end = times[0], DEFAULT_END
+    return {"start": start, "end": end, "hours": _span(start, end)}
+
+
 def parse_schedule(text: str, days: list, today: date = None) -> tuple:
     """
     text  : contexte libre de l'utilisateur
     days  : jours ouvrés « AAAA-MM-JJ » de la période
     Retourne ({jour: {"start": "10:00" | None, "end": "21:00" | None, "hours": 11.0}}, avertissements).
-    Une proposition sans jour reprend les jours de la précédente (« Lundi et mardi. Je finissais vers 21h »).
     """
     today = today or date.today()
-    schedule, warnings = {}, []
-    last_days = []
-    for raw in _CLAUSE.split(text or ""):
-        clause = _norm(raw).strip()
-        if not clause:
-            continue
-        clause_days = _days_in(clause, days, today) or last_days
-        last_days = clause_days
-        duration = _DURATION.search(clause)
-        times = _times_in(_DURATION.sub(" ", clause))
-        if not (duration or times):
-            continue
-        if not clause_days:
-            warnings.append(f"contexte : horaires sans jour de la période dans « {raw.strip()} » (ignorés)")
-            continue
+    text = _norm(text or "")
+    events = [(pos, "days", found) for pos, found in _day_refs(text, days, today)]
+    for m in _DURATION.finditer(text):
+        whole, minutes = m.group(1, 2) if m.group(1) else m.group(3, 4)
+        events.append((m.start(), "duration",
+                       round((float(whole.replace(",", ".")) + int(minutes or 0) / 60) * 4) / 4))
+    without_durations = _DURATION.sub(lambda m: " " * len(m.group(0)), text)   # mêmes positions
+    for m in _TIME.finditer(without_durations):
+        h, mi = int(m.group(1)), int(m.group(2) or 0)
+        if h <= 23 and mi <= 59:
+            events.append((m.start(), "time", f"{h:02d}:{mi:02d}"))
+    events.sort(key=lambda e: e[0])
 
-        if duration:
-            whole, minutes = duration.group(1, 2) if duration.group(1) else duration.group(3, 4)
-            entry = {"start": None, "end": None,
-                     "hours": round((float(whole.replace(",", ".")) + int(minutes or 0) / 60) * 4) / 4}
-        else:
-            if len(times) >= 2:
-                start, end = times[0], times[-1]
-            elif times[0] >= "12:00":
-                start, end = DEFAULT_START, times[0]
-            else:
-                start, end = times[0], DEFAULT_END
-            entry = {"start": start, "end": end, "hours": _span(start, end)}
-        if not MIN_DAY_HOURS <= entry["hours"] <= MAX_DAY_HOURS:
-            warnings.append(f"contexte : {describe(entry)} incohérent dans « {raw.strip()} » (ignoré)")
+    groups, current, orphans = [], None, {"days": [], "times": [], "duration": None}
+    for pos, kind, value in events:
+        if kind == "days":
+            if current is None or not current["open"]:
+                current = {"days": [], "times": [], "duration": None, "open": True}
+                if not groups and (orphans["times"] or orphans["duration"] is not None):
+                    current["times"], current["duration"] = orphans["times"], orphans["duration"]
+                    orphans = {"days": [], "times": [], "duration": None}
+                groups.append(current)
+            current["days"] += [d for d in value if d not in current["days"]]
             continue
-        for d in clause_days:
+        if current is not None:
+            current["open"] = False   # jours cités ensuite : nouveau groupe
+        if current is None:
+            if kind == "time":
+                orphans["times"].append(value)
+            else:
+                orphans["duration"] = value
+        elif kind == "time":
+            current["times"].append(value)
+        else:
+            current["duration"] = value
+
+    schedule, warnings = {}, []
+    if orphans["times"] or orphans["duration"] is not None:
+        warnings.append("contexte : horaires sans jour reconnu (ignorés) — cite le jour (lundi, hier, 12/11…)")
+    for group in groups:
+        entry = _entry(group)
+        if entry is None or not group["days"]:
+            continue   # jour sans horaire (contexte pour les libellés) ou jour hors de la période
+        if not MIN_DAY_HOURS <= entry["hours"] <= MAX_DAY_HOURS:
+            warnings.append(f"contexte : {describe(entry)} incohérent pour "
+                            f"{', '.join(group['days'])} (ignoré)")
+            continue
+        for d in group["days"]:
             schedule[d] = entry
     return schedule, warnings

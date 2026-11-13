@@ -48,3 +48,20 @@ def test_texte_sans_horaire_ou_sans_jour():
 def test_horaires_incoherents_ignores():
     schedule, warnings = parse("lundi de 21h à 10h")
     assert schedule == {} and warnings
+
+
+def test_phrase_reelle_plusieurs_jours_et_horaires():
+    # période du mardi 10 au vendredi 13 : « lundi » est hors période, « jeudi hier » = jeudi 12, « today » = vendredi 13
+    days = ["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"]
+    schedule, warnings = parse_schedule(
+        "lundi et mardi j avais des seances longues de support de test mais je venais vers 9h30 et rentrais vers "
+        "21h30, jeudi hier 9h a 18h et today j ais 2 grosses courses donc reduit pour dire 11h a 15h", days, TODAY)
+    assert schedule == {"2026-11-10": {"start": "09:30", "end": "21:30", "hours": 12.0},
+                        "2026-11-12": {"start": "09:00", "end": "18:00", "hours": 9.0},
+                        "2026-11-13": {"start": "11:00", "end": "15:00", "hours": 4.0}}
+    assert not warnings
+
+
+def test_heures_avant_le_jour():
+    schedule, _ = parse("de 10h à 21h lundi et mardi")
+    assert set(schedule) == {"2026-11-09", "2026-11-10"} and schedule["2026-11-09"]["hours"] == 11.0
