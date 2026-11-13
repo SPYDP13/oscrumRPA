@@ -1,4 +1,5 @@
-"""Calcul des heures, sans IA : chaque jour ouvré fait exactement DAY_HOURS (8 h).
+"""Calcul des heures, sans IA : chaque jour ouvré fait exactement DAY_HOURS (8 h), ou les heures déclarées par
+l'utilisateur pour ce jour (contexte du lancement, ex. 10h → 21h = 11 h : voir userContext.py).
 
 Pour chaque jour :
 1. les réunions gardent leur durée réelle ;
@@ -80,11 +81,12 @@ def working_days(since: str, until: str) -> list:
 
 
 def plan_days(days: list, commits: list, meetings_by_day: dict = None, default_project=None,
-              generic_tasks=DEFAULT_GENERIC_TASKS, day_hours: float = DAY_HOURS) -> tuple:
+              generic_tasks=DEFAULT_GENERIC_TASKS, day_hours: float = DAY_HOURS, hours_by_day: dict = None) -> tuple:
     """
     days            : jours ouvrés « AAAA-MM-JJ » (working_days)
     commits         : [{"day": "AAAA-MM-JJ", "at": datetime, "project": id timesheet ou None, "title", "repo"}]
     meetings_by_day : {"AAAA-MM-JJ": [(titre, heures), …]} — réunions gardées (durée réelle)
+    hours_by_day    : {"AAAA-MM-JJ": heures} — heures déclarées par l'utilisateur, à la place de day_hours
     Retourne (blocs, avertissements).
     """
     meetings_by_day = meetings_by_day or {}
@@ -107,11 +109,13 @@ def plan_days(days: list, commits: list, meetings_by_day: dict = None, default_p
             "label": label,
         })
 
+    hours_by_day = hours_by_day or {}
     for i, day in enumerate(days):
+        target = hours_by_day.get(day, day_hours)
         meeting_hours = sum(h for _, h in meetings_by_day.get(day, []))
-        if meeting_hours > day_hours:
-            warnings.append(f"{day} : {meeting_hours:g} h de réunions (plus de {day_hours:g} h), aucun autre travail saisi")
-        remaining = quarters(max(0.0, day_hours - meeting_hours)) * QUARTER
+        if meeting_hours > target:
+            warnings.append(f"{day} : {meeting_hours:g} h de réunions (plus de {target:g} h), aucun autre travail saisi")
+        remaining = quarters(max(0.0, target - meeting_hours)) * QUARTER
         if remaining <= 0:
             continue
 

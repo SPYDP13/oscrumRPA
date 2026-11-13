@@ -8,8 +8,10 @@ from config import EPROJET_PROJECT_ID, EXCHANGE_EMAIL, EXCHANGE_PASSWORD, TASK_S
 from taskRefinings.factory import get_refiner_class
 
 class GitlabOrangeScrumExecutor:
-    def __init__(self, since: str = None, until: str = None):
-        """since / until : période imposée (rattrapage). Sinon : depuis la dernière synchro jusqu'à aujourd'hui."""
+    def __init__(self, since: str = None, until: str = None, context: str = None):
+        """since / until : période imposée (rattrapage). Sinon : depuis la dernière synchro jusqu'à aujourd'hui.
+        context : contexte libre de l'utilisateur (horaires déclarés…) ; None = celui du plan en attente, s'il y en a un"""
+        self.context = context.strip() if context is not None else None
         self.taskList = []
         self.plan = None
         self.custom_period = bool(since or until)
@@ -20,7 +22,14 @@ class GitlabOrangeScrumExecutor:
 
         # Plan en attente (aperçu éventuellement corrigé, ou exécution interrompue) : saisi tel quel, sans rappeler l'IA
         pending = plan_store.load()
-        if plan_store.reusable(pending, since, until, self.custom_period):
+        reusable = plan_store.reusable(pending, since, until, self.custom_period)
+        if reusable and self.context is not None and self.context != pending.get("context", ""):
+            if plan_store.has_progress(pending):
+                print("⚠️ Contexte différent de celui du plan en cours de saisie : contexte ignoré, plan repris")
+            else:
+                print("🗒  Nouveau contexte : plan en attente régénéré")
+                reusable = False
+        if reusable:
             print(f"📋 Plan en attente repris (créé le {pending['created'].replace('T', ' à ')}"
                   f"{', validé' if pending.get('validated') else ''}) — pas de nouvel appel à l'IA")
             self.plan = pending
@@ -29,6 +38,8 @@ class GitlabOrangeScrumExecutor:
                 print("⚠️ Plan en attente d'une autre période (ou ancien aperçu) remplacé"
                       + (" — des tâches en avaient déjà été créées dans le timesheet" if plan_store.has_progress(pending) else ""))
             self.plan = plan_store.new(since, until, self.custom_period, self._generate(since, until))
+            self.plan["context"] = self.context or ""
+            self.plan["schedule"] = self.schedule
             plan_store.save(self.plan)
 
         self.taskList = [t for t in self.plan["tasks"] if t.get("include", True)]
@@ -61,8 +72,9 @@ class GitlabOrangeScrumExecutor:
 
         # 2. Heures (8 h / jour, calculées) puis libellés rédigés par l'IA (TASK_REFINER : claude, gemini, mistral)
         refiner_class = get_refiner_class()
-        refiner = refiner_class(commits=tasks, since=since, until=until, meetings=meetings)
+        refiner = refiner_class(commits=tasks, since=since, until=until, meetings=meetings, context=self.context)
         result = refiner.execute()
+        self.schedule = refiner.schedule
         if refiner.unmapped_repos and os.environ.get("RPA_SCHEDULED"):
             from notifier import notify
             notify("RPA Timesheet — dépôts à classer",

@@ -6,7 +6,7 @@ from datetime import datetime
 from config import (EPROJET_PROJECT_ID, EPROJET_TYPE_TACHE_REUNION_ID, GENERIC_TASKS, GITLAB_AUTHOR,
                     PROJECT_MAPPING)
 from dateformat import date_str as format_date_str
-from taskRefinings import dayPlanner
+from taskRefinings import dayPlanner, userContext
 from taskRefinings.projectMapping import resolve
 
 MAX_TASKS_PER_BLOCK = 3
@@ -15,7 +15,8 @@ MAX_TITLE = 150
 
 class LlmTaskRefiner:
     """
-    Transforme commits et réunions en tâches de timesheet, 8 h pile par jour ouvré.
+    Transforme commits et réunions en tâches de timesheet, 8 h pile par jour ouvré (ou les heures déclarées dans le
+    contexte du lancement, lues sans IA : taskRefinings/userContext.py).
 
     - Les heures sont calculées par le code (taskRefinings/dayPlanner.py) : réunions à leur durée réelle, reste
       réparti entre projets selon l'activité réelle, jours sans commit comblés de manière réaliste.
@@ -26,12 +27,13 @@ class LlmTaskRefiner:
     """
     NAME = "IA"
 
-    def __init__(self, commits: list, since: str, until: str, meetings: list = None):
+    def __init__(self, commits: list, since: str, until: str, meetings: list = None, context: str = ""):
         """
         commits  : commits GitLab (GitlabLogExtractor : sha, title, authored_at, project_id, project_path…)
         since    : "2026-04-20T00:00:00Z" (ou « J 23:59:59 » : point de reprise, la période commence au lendemain)
         until    : "2026-05-31T23:59:59Z"
         meetings : réunions Outlook (OutlookCalendarExtractor) — reprises telles quelles avec leur durée réelle
+        context  : contexte libre de l'utilisateur (horaires déclarés, faits marquants), facultatif
         """
         self.commits = commits
         self.since = since
@@ -39,6 +41,8 @@ class LlmTaskRefiner:
         self.meetings = meetings or []
         self._flag_overlaps()
         self.kept_meetings = [m for m in self.meetings if m["include"]]
+        self.context = (context or "").strip()
+        self.schedule = {}   # {jour: {"start", "end", "hours"}} : horaires déclarés dans le contexte
         self.unmapped_repos = []
         self.warnings = []
 
@@ -82,10 +86,20 @@ class LlmTaskRefiner:
             print("⚠️ Aucun commit sur la période : les journées sont comblées par le suivi des réunions et des "
                   "activités génériques. Si tu as poussé du code, vérifie l'auteur GitLab dans la configuration.")
 
+        if self.context:
+            self.schedule, warnings = userContext.parse_schedule(self.context, working_days)
+            self.warnings += warnings
+            print(f"🗒  Contexte : {self.context}")
+            for day, entry in sorted(self.schedule.items()):
+                print(f"   ⏱ {datetime.strptime(day, '%Y-%m-%d'):%A %d %b} : {userContext.describe(entry)}")
+            if not self.schedule:
+                print("   (aucun horaire reconnu : 8 h par jour ; le contexte sert seulement aux libellés)")
+
         meeting_tasks = self._meeting_tasks(working_days)
         blocks, warnings = dayPlanner.plan_days(
             working_days, self._planner_commits(), self._meetings_by_day(), EPROJET_PROJECT_ID,
-            GENERIC_TASKS or dayPlanner.DEFAULT_GENERIC_TASKS)
+            GENERIC_TASKS or dayPlanner.DEFAULT_GENERIC_TASKS,
+            hours_by_day={d: e["hours"] for d, e in self.schedule.items()})
         self.warnings += warnings
 
         labels = self._write_labels([b for b in blocks if b["kind"] != "generic"])
@@ -187,9 +201,14 @@ class LlmTaskRefiner:
     def _build_prompt(self, blocks: list) -> str:
         source = [{"bloc": b["id"], "jour": b["day"], "heures": b["hours"], "nature": b["kind"],
                    "depots": [r.rsplit("/", 1)[-1] for r in b["repos"]], "commits": b["commits"]} for b in blocks]
+        context = (f"""
+## Contexte donné par l'utilisateur (pour mieux formuler, sans rien inventer au-delà)
+{self.context}
+Les heures sont déjà calculées en tenant compte de ce contexte : il ne change jamais les heures d'un bloc.
+""" if self.context else "")
         return f"""Tu rédiges des libellés de tâches de timesheet à partir de commits Git RÉELS.
 Les heures de chaque bloc sont déjà calculées : tu ne changes pas le total d'un bloc.
-
+{context}
 ## Blocs
 {json.dumps(source, ensure_ascii=False, indent=2)}
 
@@ -308,7 +327,8 @@ Réponds UNIQUEMENT avec un tableau JSON valide, sans markdown ni texte autour :
         for day in sorted(day_map):
             day_tasks = day_map[day]
             total_h = sum(t["hours"] for t in day_tasks)
-            status = "✅" if abs(total_h - dayPlanner.DAY_HOURS) < 0.01 else "⚠️"
+            target = self.schedule.get(day.isoformat(), {}).get("hours", dayPlanner.DAY_HOURS)
+            status = "✅" if abs(total_h - target) < 0.01 else "⚠️"
             print(f"  {status} {day:%A %d %b} : {total_h:g}h — {len(day_tasks)} tâche(s)")
             for t in day_tasks:
                 flag = " ⚠️ non classé" if t.get("unmapped") else ""

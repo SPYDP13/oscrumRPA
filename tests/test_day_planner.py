@@ -90,3 +90,10 @@ def test_plus_de_8h_de_reunions():
 def test_commit_hors_periode_ignore():
     blocks, _ = plan_days(["2026-10-27"], [commit("2026-10-20", "10:00", "12")], {}, "99")
     assert all(b["kind"] == "generic" for b in blocks)
+
+
+def test_heures_declarees_remplacent_les_8h():
+    d1, d2 = "2026-10-27", "2026-10-28"
+    blocks, _ = plan_days([d1, d2], [commit(d1, "10:00", "12"), commit(d2, "10:00", "12")],
+                          {d1: [("Daily", 0.5)]}, "99", hours_by_day={d1: 11.0})
+    assert hours_by_day(blocks) == {d1: 10.5, d2: 8.0}   # 11 h déclarées dont 0.5 h de réunion ; d2 inchangé

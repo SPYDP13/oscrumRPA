@@ -25,6 +25,7 @@ import plan_store
 from app_paths import DATA_DIR, FROZEN, LOGS_DIR, entry_command, with_extra_path
 from config import ENV_PATH, SECRET_KEYS
 from taskProvider.gitlab.syncState import get_last_run, get_last_since, set_resume_date
+from taskRefinings import userContext
 from taskRefinings.projectMapping import format_mapping, group_of, parse_mapping, resolve
 from ui import catalog, checks, scheduler, settings_store
 from ui.theme import STYLESHEET
@@ -800,34 +801,51 @@ class SetupDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────
-class PeriodDialog(QDialog):
-    """Choix d'une période de rattrapage"""
+class RunDialog(QDialog):
+    """Lancement d'une exécution (période courante ou rattrapage) : contexte facultatif, puis prévisualisation du plan
+    à valider avant toute saisie dans le timesheet"""
 
-    def __init__(self, parent=None):
+    def __init__(self, custom: bool, context: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Rattrapage")
-        self.setMinimumWidth(460)
+        self.custom = custom
+        self.setWindowTitle("Rattrapage" if custom else "Exécuter maintenant")
+        self.setMinimumWidth(520)
         today = QDate.currentDate()
         self.start = QDateEdit(today.addDays(-(today.dayOfWeek() - 1)))  # lundi de la semaine
         self.end = QDateEdit(today)
         for d in (self.start, self.end):
             d.setCalendarPopup(True)
             d.setDisplayFormat("dd/MM/yyyy")
+        self.context = QPlainTextEdit(context)
+        self.context.setPlaceholderText("Ex. : lundi mardi je venais vers 10h et finissais vers 21h. "
+                                        "Mercredi mise en production du module paiement.")
+        self.context.setFixedHeight(90)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
-        lay.addWidget(_label("Rattrapage sur une période", "h2"))
-        dates = QGridLayout()
-        dates.addWidget(_label("Du", "fieldLabel"), 0, 0)
-        dates.addWidget(_label("Au", "fieldLabel"), 0, 1)
-        dates.addWidget(self.start, 1, 0)
-        dates.addWidget(self.end, 1, 1)
-        lay.addLayout(dates)
-        lay.addWidget(_label("E-PROJET n'accepte la saisie que sur les 8 derniers jours. "
-                             "Le point de reprise automatique n'est pas modifié.", "hint", wrap=True))
+        if custom:
+            lay.addWidget(_label("Rattrapage sur une période", "h2"))
+            dates = QGridLayout()
+            dates.addWidget(_label("Du", "fieldLabel"), 0, 0)
+            dates.addWidget(_label("Au", "fieldLabel"), 0, 1)
+            dates.addWidget(self.start, 1, 0)
+            dates.addWidget(self.end, 1, 1)
+            lay.addLayout(dates)
+            lay.addWidget(_label("E-PROJET n'accepte la saisie que sur les 8 derniers jours. "
+                                 "Le point de reprise automatique n'est pas modifié.", "hint", wrap=True))
+        else:
+            lay.addWidget(_label("Exécuter maintenant", "h2"))
+            lay.addWidget(_label(f"Période du {_resume_day():%d/%m/%Y} à aujourd'hui.", "subtitle", wrap=True))
+        lay.addWidget(_label("Contexte (facultatif)", "fieldLabel"))
+        lay.addWidget(self.context)
+        lay.addWidget(_label("Horaires reconnus (jours : lundi, hier, 12/11, ces 2 derniers jours… ; heures : 10h, "
+                             "10h30, 21 heures, « j'ai fait 9h30 ») : ils remplacent les 8 h du jour, sans déduire "
+                             "de pause (10h → 21h = 11 h). Le reste du texte aide seulement l'IA à rédiger les "
+                             "libellés.", "hint", wrap=True))
+        lay.addWidget(_label("Le plan s'affiche ensuite pour validation : rien n'est saisi avant.", "hint", wrap=True))
         buttons = QHBoxLayout()
-        cancel, ok = _button("Annuler"), _button("Lancer", "primary")
+        cancel, ok = _button("Annuler"), _button("Prévisualiser", "primary")
         cancel.clicked.connect(self.reject)
         ok.clicked.connect(self.accept)
         buttons.addStretch()
@@ -835,8 +853,12 @@ class PeriodDialog(QDialog):
         buttons.addWidget(ok)
         lay.addLayout(buttons)
 
-    def period(self) -> tuple:
-        return self.start.date().toString("yyyy-MM-dd"), self.end.date().toString("yyyy-MM-dd")
+    def args(self) -> list:
+        """Arguments de --run : période (rattrapage) et contexte"""
+        args = ["--since", self.start.date().toString("yyyy-MM-dd"),
+                "--until", self.end.date().toString("yyyy-MM-dd")] if self.custom else []
+        context = re.sub(r"\s+", " ", self.context.toPlainText()).strip()
+        return args + (["--context", context] if context else [])
 
 
 def _resume_day() -> date:
@@ -888,7 +910,8 @@ class PlanDialog(QDialog):
     CONFLICT = QColor(245, 158, 11, 70)
     UNMAPPED = QColor(59, 130, 246, 55)
 
-    def __init__(self, plan: dict, parent=None):
+    def __init__(self, plan: dict, parent=None, confirm: bool = False):
+        """confirm : récapitulatif avant saisie (« Valider et saisir » lance la saisie effective)"""
         super().__init__(parent)
         self.plan = plan
         self.discarded = False
@@ -956,6 +979,11 @@ class PlanDialog(QDialog):
         day = lambda s, shift: (datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=shift)).date()
         period = f"{day(plan['since'], 1):%d/%m/%Y} → {day(plan['until'], 0):%d/%m/%Y}"
         self.totals = _label("", "hint", wrap=True)
+        schedule = " · ".join(
+            f"{DAYS_FR[date.fromisoformat(d).weekday()]} {date.fromisoformat(d):%d/%m} : {userContext.describe(e)}"
+            for d, e in sorted((plan.get("schedule") or {}).items()))
+        context = (f"🗒 Contexte : « {plan['context']} »" + (f" — horaires retenus : {schedule}" if schedule else
+                   " — aucun horaire reconnu (8 h par jour)")) if plan.get("context") else ""
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
@@ -964,15 +992,20 @@ class PlanDialog(QDialog):
         lay.addWidget(_label(
             f"Période {period}{' (rattrapage)' if plan['custom'] else ''} — "
             f"{'validé' if plan.get('validated') else 'non validé'}. Corrige les titres, dates (JJ/MM/AAAA) et heures, "
-            "décoche ce qui ne doit pas être saisi. La prochaine exécution saisit exactement ce plan."
+            "décoche ce qui ne doit pas être saisi. "
+            + ("« Valider et saisir » saisit exactement ce plan dans le timesheet ; « Annuler » ne saisit rien."
+               if confirm else "La prochaine exécution saisit exactement ce plan.")
             + (f" ⚠️ {conflicts} réunion(s) en conflit (surlignées) : la plus longue est cochée, choisis celle à garder."
                if conflicts else "")
             + (f" 🔵 {unmapped} tâche(s) d'un dépôt sans correspondance (en bleu) : rangées dans ton projet principal, "
                "vérifie le projet." if unmapped else ""), "subtitle", wrap=True))
+        if context:
+            lay.addWidget(_label(context, "hint", wrap=True))
         lay.addWidget(self.table, 1)
         lay.addWidget(self.totals)
         buttons = QHBoxLayout()
-        discard, cancel, ok = _button("Abandonner le plan", "danger"), _button("Annuler"), _button("Valider", "primary")
+        discard, cancel = _button("Abandonner le plan", "danger"), _button("Annuler")
+        ok = _button("Valider et saisir" if confirm else "Valider", "primary")
         discard.clicked.connect(self._discard)
         cancel.clicked.connect(self.reject)
         ok.clicked.connect(self._save)
@@ -1129,6 +1162,7 @@ class MainWindow(QMainWindow):
         self.resize(1180, 780)
         self.process = None
         self.log_file = None
+        self.run_args, self.confirm_args = [], None
 
         # En-tête
         header = QHBoxLayout()
@@ -1167,7 +1201,7 @@ class MainWindow(QMainWindow):
         self.btn_resume = _button("Point de reprise…")
         self.btn_stop = _button("■  Arrêter", "danger")
         self.btn_schedule = _button("")
-        self.btn_run.clicked.connect(lambda: self.start_run([]))
+        self.btn_run.clicked.connect(self.run_now)
         self.btn_preview.clicked.connect(lambda: self.start_run(["--dry-run"]))
         self.btn_period.clicked.connect(self.run_period)
         self.btn_resume.clicked.connect(self.edit_resume)
@@ -1262,7 +1296,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.refresh()
             if dialog.cb_run_now.isChecked():
-                self.start_run([])
+                self.run_now()
 
     def toggle_schedule(self):
         try:
@@ -1271,11 +1305,24 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erreur", f"Programmation impossible : {e}")
         self.refresh()
 
+    def run_now(self):
+        self._launch(RunDialog(False, self._pending_context(), self))
+
     def run_period(self):
-        dialog = PeriodDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            since, until = dialog.period()
-            self.start_run(["--since", since, "--until", until])
+        self._launch(RunDialog(True, self._pending_context(), self))
+
+    @staticmethod
+    def _pending_context() -> str:
+        plan = plan_store.load()
+        return (plan or {}).get("context", "")
+
+    def _launch(self, dialog: RunDialog):
+        """Prévisualisation (--dry-run) puis plan à valider ; la saisie effective n'est lancée qu'après validation"""
+        if self.process or dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        args = dialog.args()
+        self.start_run(args + ["--dry-run"])
+        self.confirm_args = args
 
     def edit_resume(self):
         dialog = ResumeDialog(min(_resume_day(), date.today()), self)
@@ -1289,19 +1336,31 @@ class MainWindow(QMainWindow):
             self._append("\n🔗 Correspondances enregistrées (prises en compte à la prochaine analyse)\n")
             self.refresh()
 
-    def open_plan(self):
+    def open_plan(self, confirm_args: list = None):
+        """confirm_args : récapitulatif d'une exécution prévisualisée ; validé, il est saisi aussitôt"""
         plan = plan_store.load()
         if not plan:
             return
-        dialog = PlanDialog(plan, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._append("\n🗑 Plan abandonné\n" if dialog.discarded else "\n📋 Plan validé : saisi tel quel à la prochaine exécution\n")
+        dialog = PlanDialog(plan, self, confirm=confirm_args is not None)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted and dialog.discarded:
+            self._append("\n🗑 Plan abandonné\n")
+        elif accepted and confirm_args is not None:
+            self._append("\n📋 Plan validé : saisie dans le timesheet\n")
+            self.refresh()
+            self.start_run(confirm_args)
+            return
+        elif accepted:
+            self._append("\n📋 Plan validé : saisi tel quel à la prochaine exécution\n")
+        elif confirm_args is not None:
+            self._append("\n⏸ Saisie annulée : le plan est conservé (« Plan… » pour le revoir)\n")
         self.refresh()
 
     def start_run(self, args: list):
         if self.process:
             return
         self.run_args = args
+        self.confirm_args = None
         os.makedirs(LOGS_DIR, exist_ok=True)
         self.log_file = open(os.path.join(LOGS_DIR, f"rpa_{date.today().isoformat()}.log"), "a", encoding="utf-8")
         self._append(f"\n===== {datetime.now():%d/%m/%Y %H:%M:%S} — main.py {' '.join(args)} =====\n")
@@ -1350,7 +1409,9 @@ class MainWindow(QMainWindow):
         if not ok and not stopped:
             QMessageBox.warning(self, "RPA Timesheet", "L'exécution a échoué — voir le journal.")
         elif ok and "--dry-run" in self.run_args:
-            self.open_plan()  # l'aperçu est un plan à relire / corriger avant la saisie
+            # l'aperçu est un plan à relire / corriger ; après « Exécuter » ou « Rattrapage », sa validation lance la saisie
+            confirm, self.confirm_args = self.confirm_args, None
+            self.open_plan(confirm)
 
     def _append(self, text: str):
         self.log.moveCursor(QTextCursor.MoveOperation.End)

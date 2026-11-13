@@ -55,7 +55,7 @@ def _run(args) -> int:
         if not browser_setup.install():
             print("❌ Téléchargement du navigateur impossible")
             return 1
-    run(args.since, args.until, args.dry_run)
+    run(args.since, args.until, args.dry_run, args.context)
     return 0
 
 
