@@ -1404,6 +1404,7 @@ class MainWindow(QMainWindow):
             end = f"❌ Échec (code {code})"
         self._append(f"\n===== {end} =====\n")
         self.log_file.close()
+        self.log_file = None  # sinon _append écrit dans un fichier fermé (ValueError) et la saisie validée ne part pas
         self.process = None
         self.refresh()
         if not ok and not stopped:
